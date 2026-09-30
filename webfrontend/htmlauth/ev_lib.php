@@ -815,7 +815,7 @@ function ev_http($pfad, $methode = 'GET', $rumpf = null, $zeit = 8)
         $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
         $err = curl_error($ch);
         $typ = (string) curl_getinfo($ch, CURLINFO_CONTENT_TYPE);
-        curl_close($ch);
+        if (PHP_VERSION_ID < 80000) { curl_close($ch); }
         if ($body === false) {
             return array('ok' => 0, 'code' => 0, 'body' => '', 'typ' => '',
                          'fehler' => ev_netzfehler($err, $url));
@@ -4028,7 +4028,7 @@ function ev_selbsttest_endpunkt($aktion = 'status', $zeit = 10)
         $body = curl_exec($ch);
         $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
         $fehler = curl_error($ch);
-        curl_close($ch);
+        if (PHP_VERSION_ID < 80000) { curl_close($ch); }
         if ($body === false) { return array(0, 0, ev_netzfehler($fehler, $url), $url); }
     } else {
         /* Kopfzeilen ueber den Datenstrom (C8, seit 0.9.34) - ev_http_strom(). */
