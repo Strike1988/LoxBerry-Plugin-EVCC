@@ -59,6 +59,10 @@ if (isset($_GET['form']) && preg_match($ev_muster, 'tab-' . $_GET['form'])) {
 $ev_post = (isset($_SERVER['REQUEST_METHOD']) ? $_SERVER['REQUEST_METHOD'] : '') === 'POST';
 $ev_meldungen = array();
 $ev_fehler = array();
+/* X-2 (Regeln/04): die Eingaben eines abgewiesenen Formulars und die Namen
+ * der beanstandeten Felder - sie reisen mit der Einmalmeldung. */
+$ev_eingaben = array();
+$ev_bean = array();
 
 /* ---------------------------------------------------------------- *
  * Der Wachposten - EIN Posten, vor allen Handlern.
@@ -141,6 +145,7 @@ if ($ev_post && isset($_POST['speichern'])) {
     $ev_url = trim((string) (isset($_POST['url']) ? $_POST['url'] : ''));
     if ($ev_url === '' || !preg_match('#^https?://[A-Za-z0-9\.\-]+(:[0-9]{1,5})?(/\S*)?$#', $ev_url)) {
         $ev_fehler[] = ev_t('EINST.FEHLER_URL');
+        $ev_bean[] = 'url';
     } else {
         $ev_cfg['url'] = rtrim($ev_url, '/');
     }
@@ -165,10 +170,13 @@ if ($ev_post && isset($_POST['speichern'])) {
         $ev_pw = (string) $_POST['passwort'];
         if (preg_match('/[\x00-\x1F\x7F]/', $ev_pw)) {
             $ev_fehler[] = ev_t('EINST.FEHLER_PASSWORT_ZEICHEN');
+            $ev_bean[] = 'passwort';
         } elseif ($ev_pw !== trim($ev_pw)) {
             $ev_fehler[] = ev_t('EINST.FEHLER_PASSWORT_RAND');
+            $ev_bean[] = 'passwort';
         } elseif (!ev_wert_pruefen('passwort', $ev_pw)) {
             $ev_fehler[] = ev_t('EINST.FEHLER_PASSWORT_LANG');
+            $ev_bean[] = 'passwort';
         } else {
             $ev_cfg['passwort'] = $ev_pw;
         }
@@ -187,6 +195,7 @@ if ($ev_post && isset($_POST['speichern'])) {
         $ev_roh = (isset($_POST[$ev_k]) && is_string($_POST[$ev_k])) ? (string) $_POST[$ev_k] : '';
         if (!ev_wert_pruefen($ev_k, $ev_roh)) {
             $ev_fehler[] = sprintf(ev_t('EINST.FEHLER_GANZZAHL'), ev_t($ev_r[0]), $ev_r[1], $ev_r[2]);
+            $ev_bean[] = $ev_k;
         } else {
             $ev_cfg[$ev_k] = (int) $ev_roh;
         }
@@ -201,6 +210,10 @@ if ($ev_post && isset($_POST['speichern'])) {
     $ev_cfg['steuerung_ein'] = isset($_POST['steuerung_ein']) ? 1 : 0;
     $ev_cfg['update_ein'] = isset($_POST['update_ein']) ? 1 : 0;
 
+    /* Abgewiesen: die Eingaben reisen zurueck ins Formular (X-2). */
+    if ($ev_fehler) {
+        $ev_eingaben = ev_eingaben_sammeln('speichern', $ev_bean);
+    }
     if (!$ev_fehler) {
         if (ev_config_write($ev_cfg)) {
             $ev_meldungen[] = ev_t('EINST.GESPEICHERT');
@@ -215,6 +228,8 @@ if ($ev_post && isset($_POST['speichern'])) {
             }
         } else {
             $ev_fehler[] = sprintf(ev_t('EINST.FEHLER_SPEICHERN'), ev_e(ev_paths()['config']));
+            // Nicht gespeichert: auch dann bleiben die Eingaben stehen (X-2).
+            $ev_eingaben = ev_eingaben_sammeln('speichern', array());
         }
     }
     $ev_tab = 'tab-settings';
@@ -238,14 +253,20 @@ if ($ev_post && isset($_POST['save_mqtt'])) {
     $ev_mtopic = (isset($_POST['mqtt_topic']) && is_string($_POST['mqtt_topic'])) ? (string) $_POST['mqtt_topic'] : '';
     if (!ev_wert_pruefen('mqtt_topic', $ev_mtopic)) {
         $ev_fehler[] = ev_t('EINST.FEHLER_TOPIC');
+        $ev_bean[] = 'mqtt_topic';
     } else {
         $ev_mcfg['mqtt_topic'] = $ev_mtopic;
     }
     $ev_mvoll = (isset($_POST['mqtt_vollsend_min']) && is_string($_POST['mqtt_vollsend_min'])) ? (string) $_POST['mqtt_vollsend_min'] : '';
     if (!ev_wert_pruefen('mqtt_vollsend_min', $ev_mvoll)) {
         $ev_fehler[] = ev_t('EINST.FEHLER_VOLLSEND');
+        $ev_bean[] = 'mqtt_vollsend_min';
     } else {
         $ev_mcfg['mqtt_vollsend_min'] = (int) $ev_mvoll;
+    }
+    /* Abgewiesen: die Eingaben reisen zurueck ins Formular (X-2). */
+    if ($ev_fehler) {
+        $ev_eingaben = ev_eingaben_sammeln('save_mqtt', $ev_bean);
     }
     if (!$ev_fehler) {
         if (ev_config_write($ev_mcfg)) {
@@ -271,6 +292,7 @@ if ($ev_post && isset($_POST['save_mqtt'])) {
             // Bediener haelt das fuer einen Bedienfehler und versucht es
             // wieder. Die beiden Schwesterhandler haben den Zweig laengst.
             $ev_fehler[] = sprintf(ev_t('EINST.FEHLER_SPEICHERN'), ev_e(ev_paths()['config']));
+            $ev_eingaben = ev_eingaben_sammeln('save_mqtt', array());
         }
     }
     $ev_tab = 'tab-mqtt';
@@ -355,7 +377,8 @@ if ($ev_post && isset($_POST['ev_zurueck'])) {
  * oberflaeche, Befund 1). Downloads (Vorlage, Sicherung) sind oben schon mit
  * exit fertig. Auch die Abweisung durch den Wachposten geht diesen Weg. */
 if ($ev_post) {
-    if (!ev_meldung_ablegen(array('meldungen' => $ev_meldungen, 'fehler' => $ev_fehler))) {
+    if (!ev_meldung_ablegen(array('meldungen' => $ev_meldungen, 'fehler' => $ev_fehler,
+                                  'eingaben' => $ev_eingaben))) {
         ev_log('Die Einmalmeldung liess sich nicht schreiben - das Ergebnis des letzten '
             . 'Knopfdrucks ist nach der Umleitung nicht zu sehen.');
     }
@@ -366,6 +389,8 @@ $ev_einmal = ev_meldung_abholen();
 if ($ev_einmal !== null) {
     $ev_meldungen = array_merge($ev_meldungen, $ev_einmal['meldungen']);
     $ev_fehler = array_merge($ev_fehler, $ev_einmal['fehler']);
+    // X-2: ev_eingabe() und ev_markierung() lesen sie von hier.
+    $ev_eingaben = $ev_einmal['eingaben'];
 }
 
 if (class_exists('LBWeb', false)) {
@@ -440,6 +465,8 @@ if (class_exists('LBWeb', false)) {
     padding: 10px 12px; margin: 12px 0; font-size: 0.9em; }
 .sm-fehler { border: 1px solid #ef9a9a; background: #ffebee; border-radius: 6px;
     padding: 10px 12px; margin: 12px 0; font-size: 0.9em; }
+/* Ein beanstandetes Feld nach der Umleitung (X-2, Regeln/04). */
+.sm-wrap input.sm-beanstandet { border: 2px solid #c62828 !important; background: #fff5f5 !important; }
 .sm-an  { color: #1a7f1a; font-weight: 700; }
 .sm-aus { color: #b00000; font-weight: 700; }
 .sm-row { display: flex; gap: 12px; flex-wrap: wrap; }
@@ -573,11 +600,14 @@ foreach ($ev_zeitraum as $ev_k => $ev_s) {
   <?php echo ev_fmt(); ?>
 <input data-role="none" type="hidden" name="speichern" value="1">
 <input data-role="none" type="hidden" name="activetab" value="tab-settings">
+<?php if (ev_eingaben_aktiv('speichern')) { ?>
+<div class="sm-warnung"><?= ev_e(ev_t('EINST.EINGABEN_ZURUECK')) ?></div>
+<?php } ?>
 
 <h2><?= ev_e(ev_t('EINST.H_VERBINDUNG')) ?></h2>
 <div class="sm-feld">
   <label for="url"><?= ev_e(ev_t('EINST.L_URL')) ?></label>
-  <input data-role="none" type="text" id="url" name="url" value="<?= ev_e($ev_cfg['url']) ?>" placeholder="http://127.0.0.1:7070">
+  <input data-role="none" type="text" id="url" name="url" value="<?= ev_e(ev_eingabe('speichern', 'url', $ev_cfg['url'])) ?>"<?= ev_markierung('speichern', 'url') ?> placeholder="http://127.0.0.1:7070">
   <div class="sm-hilfe"><?= ev_t('EINST.H_URL') ?></div>
 <?php
 /* "Es steht hier immer noch 127.0.0.1" - die haeufigste Rueckfrage zu diesem
@@ -592,32 +622,32 @@ if ($ev_link !== $ev_cfg['url']) { ?>
 </div>
 <div class="sm-feld">
   <label for="passwort"><?= ev_e(ev_t('EINST.L_PASSWORT')) ?></label>
-  <input data-role="none" type="password" id="passwort" name="passwort" value="" placeholder="<?= ev_e($ev_cfg['passwort'] !== '' ? ev_t('EINST.P_GESETZT') : ev_t('EINST.P_LEER')) ?>">
+  <input data-role="none" type="password" id="passwort" name="passwort" value=""<?= ev_markierung('speichern', 'passwort') ?> placeholder="<?= ev_e($ev_cfg['passwort'] !== '' ? ev_t('EINST.P_GESETZT') : ev_t('EINST.P_LEER')) ?>">
   <div class="sm-hilfe"><?= ev_t('EINST.H_PASSWORT') ?></div>
   <label style="display:inline-flex;align-items:center;gap:8px;margin-top:6px;font-weight:400;">
-    <input data-role="none" type="checkbox" name="passwort_loeschen" value="1">
+    <input data-role="none" type="checkbox" name="passwort_loeschen" value="1" <?= ev_eingabe('speichern', 'passwort_loeschen', 0) ? 'checked' : '' ?>>
     <?= ev_e(ev_t('EINST.L_PASSWORT_LOESCHEN')) ?>
   </label>
 </div>
 <div class="sm-row">
   <div class="sm-feld">
     <label for="takt"><?= ev_e(ev_t('EINST.L_TAKT')) ?></label>
-    <input data-role="none" type="number" id="takt" name="takt" value="<?= (int) $ev_cfg['takt'] ?>" min="5" max="60">
+    <input data-role="none" type="number" id="takt" name="takt" value="<?= ev_e(ev_eingabe('speichern', 'takt', (int) $ev_cfg['takt'])) ?>"<?= ev_markierung('speichern', 'takt') ?> min="5" max="60">
     <div class="sm-hilfe"><?= ev_t('EINST.H_TAKT') ?></div>
   </div>
   <div class="sm-feld">
     <label for="ladepunkte"><?= ev_e(ev_t('EINST.L_LADEPUNKTE')) ?></label>
-    <input data-role="none" type="number" id="ladepunkte" name="ladepunkte" value="<?= (int) $ev_cfg['ladepunkte'] ?>" min="0" max="<?= EV_LADEPUNKTE ?>">
+    <input data-role="none" type="number" id="ladepunkte" name="ladepunkte" value="<?= ev_e(ev_eingabe('speichern', 'ladepunkte', (int) $ev_cfg['ladepunkte'])) ?>"<?= ev_markierung('speichern', 'ladepunkte') ?> min="0" max="<?= EV_LADEPUNKTE ?>">
   </div>
   <div class="sm-feld">
     <label for="fahrzeuge"><?= ev_e(ev_t('EINST.L_FAHRZEUGE')) ?></label>
-    <input data-role="none" type="number" id="fahrzeuge" name="fahrzeuge" value="<?= (int) $ev_cfg['fahrzeuge'] ?>" min="0" max="<?= EV_FAHRZEUGE ?>">
+    <input data-role="none" type="number" id="fahrzeuge" name="fahrzeuge" value="<?= ev_e(ev_eingabe('speichern', 'fahrzeuge', (int) $ev_cfg['fahrzeuge'])) ?>"<?= ev_markierung('speichern', 'fahrzeuge') ?> min="0" max="<?= EV_FAHRZEUGE ?>">
     <div class="sm-hilfe"><?= ev_t('EINST.H_FAHRZEUGE') ?></div>
   </div>
 </div>
 <div class="sm-feld">
   <label style="display:inline-flex;align-items:center;gap:8px;font-weight:400;">
-    <input data-role="none" type="checkbox" name="tarife_ein" value="1" <?= !empty($ev_cfg['tarife_ein']) ? 'checked' : '' ?>>
+    <input data-role="none" type="checkbox" name="tarife_ein" value="1" <?= !empty(ev_eingabe('speichern', 'tarife_ein', $ev_cfg['tarife_ein'])) ? 'checked' : '' ?>>
     <?= ev_e(ev_t('EINST.L_TARIFE')) ?>
   </label>
 </div>
@@ -626,7 +656,7 @@ if ($ev_link !== $ev_cfg['url']) { ?>
 <div class="sm-warnung"><?= ev_t('EINST.H_STEUERUNG_TEXT') ?></div>
 <div class="sm-feld">
   <label style="display:inline-flex;align-items:center;gap:8px;font-weight:600;">
-    <input data-role="none" type="checkbox" name="steuerung_ein" value="1" <?= !empty($ev_cfg['steuerung_ein']) ? 'checked' : '' ?>>
+    <input data-role="none" type="checkbox" name="steuerung_ein" value="1" <?= !empty(ev_eingabe('speichern', 'steuerung_ein', $ev_cfg['steuerung_ein'])) ? 'checked' : '' ?>>
     <?= ev_e(ev_t('EINST.L_STEUERUNG')) ?>
   </label>
 </div>
@@ -635,7 +665,7 @@ if ($ev_link !== $ev_cfg['url']) { ?>
 <div class="sm-warnung"><?= ev_t('EINST.H_UPDATE_TEXT') ?></div>
 <div class="sm-feld">
   <label style="display:inline-flex;align-items:center;gap:8px;font-weight:600;">
-    <input data-role="none" type="checkbox" name="update_ein" value="1" <?= !empty($ev_cfg['update_ein']) ? 'checked' : '' ?>>
+    <input data-role="none" type="checkbox" name="update_ein" value="1" <?= !empty(ev_eingabe('speichern', 'update_ein', $ev_cfg['update_ein'])) ? 'checked' : '' ?>>
     <?= ev_e(ev_t('EINST.L_UPDATE')) ?>
   </label>
   <div class="sm-hilfe"><?= ev_t('EINST.H_UPDATE_HILFE') ?></div>
@@ -659,6 +689,16 @@ if ($ev_link !== $ev_cfg['url']) { ?>
 <h2><?= ev_t('EINST.H_SICHERUNG') ?></h2>
 <div class="sm-hinweis"><?= ev_t('EINST.SICH_ERKLAERUNG') ?></div>
 <div class="sm-warnung"><?= ev_t('EINST.SICH_WARNUNG') ?></div>
+<?php
+/* X-3 (Verbesserungsbau 30.09.2026): Wuerde ein gespeicherter Wert das
+   Zurueckspielen der eigenen Sicherung nicht bestehen, steht es HIER - am
+   Knopf, denn der Download selbst kann keine Seitenmeldung tragen. Gelb: die
+   Sicherung wird trotzdem geliefert. Dieselbe Pruefung wie beim
+   Zurueckspielen (ev_sicherung_wert_mangel). */
+$ev_altwerte = ev_sicherung_altwerte($ev_cfg);
+if ($ev_altwerte) { ?>
+<div class="sm-warnung"><?= sprintf(ev_t('EINST.SICH_ALTWERT'), ev_e(implode(', ', $ev_altwerte))) ?></div>
+<?php } ?>
 <div class="sm-legende">
 <span><i class="sm-punkt sm-b-lesen"></i> <?= ev_t('LEGENDE.LESEN') ?></span>
 <span><i class="sm-punkt sm-b-aktion"></i> <?= ev_t('LEGENDE.AKTION') ?></span>
@@ -694,6 +734,9 @@ if ($ev_link !== $ev_cfg['url']) { ?>
 <input data-role="none" type="hidden" name="save_mqtt" value="1">
 <input data-role="none" type="hidden" name="activetab" value="tab-mqtt">
 <h2><?= ev_e(ev_t('EINST.H_MQTT')) ?></h2>
+<?php if (ev_eingaben_aktiv('save_mqtt')) { ?>
+<div class="sm-warnung"><?= ev_e(ev_t('EINST.EINGABEN_ZURUECK')) ?></div>
+<?php } ?>
 <?php /* Hier stand bis 0.9.10 eine zweite, eingebettete Autostart-Pruefung
          mit hart verdrahteter LoxBerry-Wurzel. Sie las den RICHTIGEN Schluessel
          (Gatewayautostart), waehrend ev_mqtt_zustand() 21 Zeilen weiter unten
@@ -701,18 +744,18 @@ if ($ev_link !== $ev_cfg['url']) { ?>
          Jetzt gibt es nur noch ev_mqtt_zustand(), und der stimmt. */ ?>
 <div class="sm-feld">
   <label style="display:inline-flex;align-items:center;gap:8px;font-weight:400;">
-    <input data-role="none" type="checkbox" name="mqtt_ein" value="1" <?= !empty($ev_cfg['mqtt_ein']) ? 'checked' : '' ?>>
+    <input data-role="none" type="checkbox" name="mqtt_ein" value="1" <?= !empty(ev_eingabe('save_mqtt', 'mqtt_ein', $ev_cfg['mqtt_ein'])) ? 'checked' : '' ?>>
     <?= ev_e(ev_t('EINST.L_MQTT_EIN')) ?>
   </label>
 </div>
 <div class="sm-feld">
   <label for="mqtt_topic"><?= ev_e(ev_t('EINST.L_MQTT_TOPIC')) ?></label>
-  <input data-role="none" type="text" id="mqtt_topic" name="mqtt_topic" value="<?= ev_e($ev_cfg['mqtt_topic']) ?>" placeholder="evcc2lox">
+  <input data-role="none" type="text" id="mqtt_topic" name="mqtt_topic" value="<?= ev_e(ev_eingabe('save_mqtt', 'mqtt_topic', $ev_cfg['mqtt_topic'])) ?>"<?= ev_markierung('save_mqtt', 'mqtt_topic') ?> placeholder="evcc2lox">
   <div class="sm-hilfe"><?= ev_t('EINST.H_MQTT_TOPIC') ?></div>
 </div>
 <div class="sm-feld">
   <label for="mqtt_vollsend_min"><?= ev_e(ev_t('EINST.L_MQTT_VOLLSEND')) ?></label>
-  <input data-role="none" type="number" id="mqtt_vollsend_min" name="mqtt_vollsend_min" value="<?= (int) $ev_cfg['mqtt_vollsend_min'] ?>" min="0" max="1440">
+  <input data-role="none" type="number" id="mqtt_vollsend_min" name="mqtt_vollsend_min" value="<?= ev_e(ev_eingabe('save_mqtt', 'mqtt_vollsend_min', (int) $ev_cfg['mqtt_vollsend_min'])) ?>"<?= ev_markierung('save_mqtt', 'mqtt_vollsend_min') ?> min="0" max="1440">
   <div class="sm-hilfe"><?= ev_t(ev_gateway_schluessel('EINST.H_MQTT_VOLLSEND')) ?></div>
 </div>
 <div class="sm-legende"><span><i class="sm-punkt sm-b-aktion"></i> <?= ev_t('LEGENDE.AKTION') ?></span></div>

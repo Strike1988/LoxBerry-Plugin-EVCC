@@ -3428,7 +3428,105 @@ function ev_meldung_abholen()
     $liste = function ($s) use ($d) {
         return (isset($d[$s]) && is_array($d[$s])) ? array_values(array_filter($d[$s], 'is_string')) : array();
     };
-    return array('meldungen' => $liste('meldungen'), 'fehler' => $liste('fehler'));
+    return array('meldungen' => $liste('meldungen'), 'fehler' => $liste('fehler'),
+                 'eingaben' => ev_eingaben_pruefen(isset($d['eingaben']) ? $d['eingaben'] : null));
+}
+
+/* ==================================================================
+ * Eingaben nach einer Beanstandung (X-2, Regeln/04, Hausregel 30.09.2026)
+ * ==================================================================
+ *
+ * Seit der Umleitung nach jedem POST (O1, 0.9.34) zeigte der GET nach einer
+ * Abweisung die GESPEICHERTEN Werte: wer drei Felder richtig und eines falsch
+ * eingab, tippte alle vier neu. Jetzt reisen die Eingaben des beanstandeten
+ * Formulars mit der Einmalmeldung (0600, Datenordner, 120 s, beim GET gelesen
+ * und geloescht) - nur die Felder DIESES Formulars aus der Liste unten, und
+ * nie ein Geheimnis: das Passwort steht als 'geheim' darin, damit es markiert
+ * werden kann; sein Wert reist nie mit (das Feld bleibt leer und zeigt den
+ * Platzhalter). Aktionstoken und Formularmerkmal ersetzt ev_meldung_ablegen()
+ * ohnehin durch ***. Nur nach einer Beanstandung: nach erfolgreichem
+ * Speichern zeigt der GET die gespeicherten Werte. */
+
+/** Die Felder je Formular (Wert des versteckten Feldes), mit ihrer Art. */
+function ev_eingabe_felder()
+{
+    return array(
+        'speichern' => array('url' => 'text', 'passwort' => 'geheim', 'passwort_loeschen' => 'haken',
+                             'takt' => 'text', 'ladepunkte' => 'text', 'fahrzeuge' => 'text',
+                             'tarife_ein' => 'haken', 'steuerung_ein' => 'haken', 'update_ein' => 'haken'),
+        'save_mqtt' => array('mqtt_ein' => 'haken', 'mqtt_topic' => 'text', 'mqtt_vollsend_min' => 'text'),
+    );
+}
+
+/** Die Eingaben eines abgewiesenen POST fuer die Einmalmeldung. */
+function ev_eingaben_sammeln($formular, $beanstandet)
+{
+    $liste = ev_eingabe_felder();
+    if (!isset($liste[$formular])) { return array(); }
+    $werte = array();
+    foreach ($liste[$formular] as $k => $art) {
+        if ($art === 'geheim') { continue; }            // nie mitnehmen
+        if ($art === 'haken') {
+            $werte[$k] = isset($_POST[$k]) ? 1 : 0;
+        } else {
+            $werte[$k] = (isset($_POST[$k]) && is_string($_POST[$k])) ? (string) $_POST[$k] : '';
+        }
+    }
+    $felder = array();
+    foreach ((array) $beanstandet as $k) {
+        if (is_string($k) && isset($liste[$formular][$k]) && !in_array($k, $felder, true)) { $felder[] = $k; }
+    }
+    return array('formular' => $formular, 'werte' => $werte, 'felder' => $felder);
+}
+
+/** Die Eingaben aus der Einmalmeldung - nur, was die Liste kennt. */
+function ev_eingaben_pruefen($e)
+{
+    $liste = ev_eingabe_felder();
+    if (!is_array($e) || !isset($e['formular']) || !is_string($e['formular'])
+        || !isset($liste[$e['formular']])) {
+        return array();
+    }
+    $f = $e['formular'];
+    $werte = array();
+    if (isset($e['werte']) && is_array($e['werte'])) {
+        foreach ($liste[$f] as $k => $art) {
+            if ($art === 'geheim' || !array_key_exists($k, $e['werte'])) { continue; }
+            $w = $e['werte'][$k];
+            if ($art === 'haken') { $werte[$k] = empty($w) ? 0 : 1; }
+            elseif (is_string($w)) { $werte[$k] = $w; }
+        }
+    }
+    $felder = array();
+    if (isset($e['felder']) && is_array($e['felder'])) {
+        foreach ($e['felder'] as $k) {
+            if (is_string($k) && isset($liste[$f][$k])) { $felder[] = $k; }
+        }
+    }
+    return array('formular' => $f, 'werte' => $werte, 'felder' => $felder);
+}
+
+/** Traegt die Seite gerade die Eingaben dieses Formulars? */
+function ev_eingaben_aktiv($formular)
+{
+    $e = isset($GLOBALS['ev_eingaben']) ? $GLOBALS['ev_eingaben'] : array();
+    return is_array($e) && isset($e['formular']) && $e['formular'] === $formular;
+}
+
+/** Der anzuzeigende Wert: die Eingabe nach einer Beanstandung, sonst der gespeicherte. */
+function ev_eingabe($formular, $feld, $gespeichert)
+{
+    if (!ev_eingaben_aktiv($formular)) { return $gespeichert; }
+    $w = $GLOBALS['ev_eingaben']['werte'];
+    return array_key_exists($feld, $w) ? $w[$feld] : $gespeichert;
+}
+
+/** Markierung eines beanstandeten Feldes (Klasse und aria-invalid). */
+function ev_markierung($formular, $feld)
+{
+    if (!ev_eingaben_aktiv($formular)) { return ''; }
+    return in_array($feld, $GLOBALS['ev_eingaben']['felder'], true)
+        ? ' class="sm-beanstandet" aria-invalid="true"' : '';
 }
 
 /**
@@ -3802,10 +3900,14 @@ function ev_befehl_pruefen($b, $wert)
 
 /** Wie alt duerfen die Zusatzwerte werden, bevor sie neu geholt werden.
  *  Die Preisvorschau ueberlebt einen gescheiterten Abruf, solange ihre
- *  Raten die laufende Stunde abdecken (C1, seit 0.9.34). */
+ *  Raten die laufende Stunde abdecken (C1, seit 0.9.34).
+ *
+ *  $ohne_netz = true (EVCC-a1): der Zustand von EVCC war eben nicht
+ *  abrufbar. Dann wird NICHTS abgefragt, nur aus den gespeicherten Raten
+ *  neu gerechnet. */
 define('EV_ZUSATZ_ALTER', 300);
 
-function ev_zusatz_holen($erzwingen = false)
+function ev_zusatz_holen($erzwingen = false, $ohne_netz = false)
 {
     $cache = ev_tmpdir() . '/state.json';
     $st = is_file($cache) ? json_decode((string) @file_get_contents($cache), true) : null;
@@ -3813,6 +3915,42 @@ function ev_zusatz_holen($erzwingen = false)
     $alt = isset($st['roh']['lox']['stand']) ? (int) $st['roh']['lox']['stand'] : 0;
     if (!$erzwingen && (time() - $alt) < EV_ZUSATZ_ALTER) { return 0; }
     $ev_alt_lox = (isset($st['roh']['lox']) && is_array($st['roh']['lox'])) ? $st['roh']['lox'] : array();
+
+    /* EVCC ausgefallen (EVCC-a1, Verbesserungsbau 30.09.2026).
+     *
+     * Bis 0.9.36 fragte der Abrufdienst Tarif und Statistik auch dann, wenn
+     * EVCC eben nicht geantwortet hatte: zu den 8 s des Zustandsabrufs kamen
+     * 6 + 6 s Zeitgrenze, ein Lauf dauerte ~20 s statt ~8 s
+     * (EVCC_BEFUNDE_UND_VERBESSERUNGEN.md, a1). Jetzt wird nichts abgefragt:
+     *   - die gespeicherten Raten gelten weiter wie bei einem gescheiterten
+     *     Tarifabruf (C1, seit 0.9.34) und werden fuer JETZT neu gerechnet;
+     *     deckt keine mehr die laufende Stunde ab, gilt PREIS_OK=0;
+     *   - Prognose und Statistik bleiben stehen;
+     *   - der Zeitpunkt 'stand' der Zusatzwerte bleibt stehen - der naechste
+     *     gelungene Lauf holt deshalb sofort nach.
+     * Ohne gespeicherte Zusatzwerte gibt es nichts neu zu rechnen. */
+    if ($ohne_netz) {
+        if (!$ev_alt_lox) { return 0; }
+        $lox = $ev_alt_lox;
+        $grund = ev_t('LOG.PREIS_OHNE_EVCC');
+        $alt_raten = (isset($ev_alt_lox['preis']['raten']) && is_array($ev_alt_lox['preis']['raten']))
+            ? $ev_alt_lox['preis']['raten'] : array();
+        $preis = $alt_raten ? ev_preis_rechnen($alt_raten, time()) : null;
+        if ($preis !== null) {
+            $preis['raten'] = $alt_raten;
+            $preis['alt'] = 1;
+            ev_log_wenn_neu('preis', sprintf(ev_t('LOG.PREIS_ALT'), $grund));
+        } else {
+            $preis = array('ok' => 0);
+            ev_log_wenn_neu('preis', sprintf(ev_t('LOG.PREIS_KEINE'), $grund));
+        }
+        $lox['preis'] = $preis;
+        $st2 = json_decode((string) @file_get_contents($cache), true);
+        if (is_array($st2) && isset($st2['roh']) && is_array($st2['roh'])) { $st = $st2; }
+        $st['roh']['lox'] = $lox;
+        ev_datei_schreiben($cache, (string) json_encode($st), 0664);
+        return 1;
+    }
 
     $lox = array('stand' => time());
 
@@ -4137,6 +4275,58 @@ function ev_wert_pruefen($schluessel, $wert)
     return false;
 }
 
+/**
+ * Besteht ein Wert das Zurueckspielen? Rueckgabe '' oder die Beanstandung.
+ *
+ * EINE Pruefung fuer zwei Stellen (X-3, Verbesserungsbau 30.09.2026):
+ * ev_sicherung_lesen() weist damit ab, und ev_sicherung_altwerte() sagt damit
+ * vor dem Sichern, welcher GESPEICHERTE Wert die eigene Sicherung zu Fall
+ * braechte. Zwei Pruefungen liefen auseinander.
+ *   - Form (ev_wert_taugt), Rand (nicht getrimmt, C9/O3), Regel (ev_wert_pruefen);
+ *   - ein leeres Aktionstoken ist kein Mangel: es heisst "keins gesichert",
+ *     und ev_sicherung_lesen() behaelt dann das geltende (O3).
+ */
+function ev_sicherung_wert_mangel($k, $w)
+{
+    if (!ev_wert_taugt($w)) {
+        return sprintf(ev_t('EINST.SICH_WERT_FORM'), ev_e((string) $k));
+    }
+    /* Ein Wert mit Leerzeichen am Rand wird abgewiesen und benannt, nicht
+     * getrimmt (C9, O3, seit 0.9.34). */
+    if (is_string($w) && $w !== trim($w)) {
+        return sprintf(ev_t('EINST.SICH_WERT_RAND'), ev_e((string) $k));
+    }
+    if ($k === 'aktionstoken' && (string) $w === '') {
+        return '';
+    }
+    if (!ev_wert_pruefen($k, $w)) {
+        return sprintf(ev_t('EINST.SICH_WERT_UNZULAESSIG'), ev_e((string) $k));
+    }
+    return '';
+}
+
+/**
+ * Welche GESPEICHERTEN Werte wuerde das Zurueckspielen der eigenen Sicherung
+ * abweisen? (X-3) Rueckgabe: die Schluessel, leer = keiner.
+ *
+ * Moeglich ist das, wo ev_config() einen Wert nicht selbst in die Form bringt:
+ * ein von Hand eingetragenes Thema mit Schraegstrich am Rand ('evcc2lox/'),
+ * eine Adresse oder ein Passwort mit Leerzeichen am Rand, ein Token mit
+ * Zeichen ausserhalb von A-Z a-z 0-9 _ . -. Die Sicherung wird trotzdem
+ * geliefert; die Seite sagt am Knopf, welcher Wert sie zu Fall braechte.
+ */
+function ev_sicherung_altwerte($cfg = null)
+{
+    if (!is_array($cfg)) { $cfg = ev_config(); }
+    $schlecht = array();
+    foreach (array_keys(ev_vorgaben()) as $k) {
+        if (array_key_exists($k, $cfg) && ev_sicherung_wert_mangel($k, $cfg[$k]) !== '') {
+            $schlecht[] = $k;
+        }
+    }
+    return $schlecht;
+}
+
 function ev_sicherung_lesen($roh)
 {
     $mangel = array();
@@ -4161,14 +4351,11 @@ function ev_sicherung_lesen($roh)
             $mangel[] = sprintf(ev_t('EINST.SICH_FREMD'), ev_e((string) $k));
             continue;
         }
-        if (!ev_wert_taugt($w)) {
-            $mangel[] = sprintf(ev_t('EINST.SICH_WERT_FORM'), ev_e((string) $k));
-            continue;
-        }
-        /* Ein Wert mit Leerzeichen am Rand wird abgewiesen und benannt, nicht
-         * getrimmt (C9, O3, seit 0.9.34). */
-        if (is_string($w) && $w !== trim($w)) {
-            $mangel[] = sprintf(ev_t('EINST.SICH_WERT_RAND'), ev_e((string) $k));
+        /* Form, Rand und Regel prueft EINE Funktion - dieselbe, mit der
+         * "Einstellungen sichern" vorher warnt (X-3). */
+        $ev_wm = ev_sicherung_wert_mangel($k, $w);
+        if ($ev_wm !== '') {
+            $mangel[] = $ev_wm;
             continue;
         }
         /* Ein LEERES Aktionstoken in der Sicherung heisst "keins gesichert"
@@ -4182,10 +4369,6 @@ function ev_sicherung_lesen($roh)
             $neu[$k] = $ev_jetzt;
             $hinweise[] = ev_t($ev_jetzt !== '' ? 'EINST.SICH_TOKEN_BLEIBT' : 'EINST.SICH_TOKEN_KEINS');
             $anzahl++;
-            continue;
-        }
-        if (!ev_wert_pruefen($k, $w)) {
-            $mangel[] = sprintf(ev_t('EINST.SICH_WERT_UNZULAESSIG'), ev_e((string) $k));
             continue;
         }
         $neu[$k] = $w;
@@ -4223,12 +4406,23 @@ function ev_sicherung_lesen($roh)
  */
 function ev_sicherung_bauen()
 {
-    return array(
+    $kopf = array(
         '_hinweis' => 'Sicherung des LoxBerry-Plugins EVCC. Enthaelt das '
                     . 'Aktionstoken dieser Anlage und gegebenenfalls das '
                     . 'EVCC-Passwort - wie ein Passwort behandeln.',
         '_stand'   => date('Y-m-d H:i:s'),
-    ) + array_intersect_key(ev_config(), ev_vorgaben());
+    );
+    /* X-3: Wuerde ein gespeicherter Wert das Zurueckspielen nicht bestehen,
+     * sagt es auch die Datei - nur der Schluessel, nie der Wert. Ein Schluessel
+     * mit Unterstrich wird beim Zurueckspielen uebergangen. */
+    $ev_cfg = ev_config();
+    $ev_alt = ev_sicherung_altwerte($ev_cfg);
+    if ($ev_alt) {
+        $kopf['_warnung'] = 'Diese Sicherung wird beim Zurueckspielen abgewiesen, solange '
+                          . 'diese Werte unzulaessig sind: ' . implode(', ', $ev_alt)
+                          . '. In der Oberflaeche berichtigen und neu sichern.';
+    }
+    return $kopf + array_intersect_key($ev_cfg, ev_vorgaben());
 }
 
 

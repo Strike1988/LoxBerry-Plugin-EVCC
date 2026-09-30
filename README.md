@@ -9,6 +9,27 @@ Weg nach Loxone: EVCC rechnet in Watt und veröffentlicht unter eigenen Namen,
 der Energiemanager will Kilowatt an vier bestimmten Anschlüssen. Dieses Plugin
 ist der Übersetzer dazwischen.
 
+## Neu in 0.9.36
+
+Verbesserungen aus dem Durchgang vom 30.09.2026 (Verbesserungsliste
+`Pruefung-Durchgang-2026-09-29/VERBESSERUNGEN_OFFEN.md`). Gemessen an einer
+EVCC-Attrappe unter PHP 7.4 und 8.5, je mit und ohne php-curl; nicht am Gerät.
+
+* **Fällt EVCC aus, fragt der Abruf Tarif und Statistik nicht mehr ab.** Ein
+  Lauf dauert dann 8 s statt 20 s. Die gespeicherten Preise gelten weiter,
+  solange sie die laufende Stunde decken; ist EVCC zurück, holt der nächste
+  Lauf den Tarif sofort nach.
+* **Trockenlauf für Schaltbefehle:** `&probe=1` prüft Token, Befehl, Ladepunkt,
+  Wert und Bremse und antwortet wie echt mit `PROBE=1`, sendet aber nichts und
+  lässt die Bremse unberührt. Andere Werte als `1` werden mit 400 abgewiesen,
+  damit ein vertippter Trockenlauf nie als echter Befehl hinausgeht. Ein halber
+  Ladeplan antwortet im Trockenlauf `GEMERKT=0`.
+* Nach einer Beanstandung stehen die eingetippten Werte wieder im Formular, das
+  beanstandete Feld ist markiert; Passwort und Token reisen nie mit.
+* „Einstellungen sichern“ warnt gelb am Knopf, wenn ein gespeicherter Wert das
+  Zurückspielen nicht bestehen würde. Die Sicherung kommt trotzdem vollständig;
+  ihr Kopf `_warnung` nennt nur die Namen, nie die Werte.
+
 ## Neu in 0.9.35
 
 Sammelnachzug vom 30.09.2026, sonst keine Änderung: `curl_close()` wird nur
@@ -848,6 +869,15 @@ Der Endpunkt liegt im unangemeldeten Bereich, damit Loxone ihn ohne
 Zugangsdaten erreicht, und ist durch ein Token geschützt. Verglichen wird mit
 `hash_equals`. Unbekannte Aktionen und Werte außerhalb des erlaubten Bereichs
 werden abgewiesen, nicht zurechtgebogen.
+
+**Trockenlauf:** Mit `&probe=1` an einer Befehlsadresse prüft der Endpunkt
+alles wie beim echten Befehl – Token, Freigabe, Befehl, Ladepunkt, Wert und
+Befehlsbremse – und antwortet wie echt, mit `PROBE=1` hinter `OK`. An EVCC geht
+nichts, und weder die Befehlsbremse noch der Ladeplan merken sich etwas (ein
+halber Ladeplan antwortet deshalb mit `GEMERKT=0`). Nur `probe=1` gilt; ein
+anderer Wert und `probe=1` an einer lesenden Aktion werden mit HTTP 400
+abgewiesen. Beispiel:
+`/plugins/<ordner>/index.php?token=<TOKEN>&aktion=modus&lp=1&wert=pv&probe=1`
 
 ## Laden nach Strompreis
 

@@ -24,6 +24,11 @@
  *   siehe ev_befehle() in ev_lib.php - dort stehen sie EINMAL, und Endpunkt,
  *   Oberflaeche und Loxone-Vorlage lesen alle von dort.
  *
+ * Trockenlauf (seit dem Verbesserungsbau 30.09.2026, EVCC-b1):
+ *   probe=1     an einem schreibenden Befehl: alles pruefen wie echt, Antwort
+ *               mit PROBE=1, aber nichts an EVCC senden und keinen Merker
+ *               (Bremse, Ladeplan) anlegen oder schreiben
+ *
  * Der Datenabruf gehoert NICHT hierher - der laeuft in bin/ev_abruf.php.
  * Dieser Endpunkt liest den zwischengespeicherten Zustand und reicht
  * Schaltbefehle weiter.
@@ -131,6 +136,11 @@ function ev_ende($code, $text)
     // Statuszeile - auch die Liste der erlaubten Aktionen, die dadurch in
     // einer Zeile steht statt in zweien. Lesbar bleibt sie.
     $text = str_replace(array("\r\n", "\r", "\n"), ' ', (string) $text);
+    /* Ein Trockenlauf (EVCC-b1) sagt es in JEDER Antwort, auch in einer
+     * Abweisung - gleich hinter OK, damit es nicht hinter einem Grund steht. */
+    if (!empty($GLOBALS['ev_probe'])) {
+        $text = preg_replace('/^EVCC;OK=([01])/', 'EVCC;OK=$1;PROBE=1', $text, 1);
+    }
     /* Jede Abweisung hinterlaesst eine Zeile.
      *
      * Bis 0.9.26 protokollierte dieser Endpunkt nur den abgesetzten Befehl.
@@ -209,6 +219,26 @@ if ($ev_selftest) {
  * sie beantwortet spaeter die Frage, ob der Miniserver ueberhaupt anruft. */
 ev_log_wenn_neu('endpunkt_angenommen', 'Anfrage von ' . ev_anrufer() . ' angenommen.');
 
+/* ---------------- Trockenlauf (EVCC-b1, Verbesserungsbau 30.09.2026) ----------------
+ *
+ * &probe=1 an einem schreibenden Befehl prueft alles, was der echte Befehl
+ * prueft - das Token (oben), die Freigabe, die Weissliste, den Ladepunkt, den
+ * Wert und die Bremse - und antwortet wie echt, mit PROBE=1. Gesendet wird
+ * nichts; der Merker der Bremse und der des Ladeplans werden nur gelesen, nie
+ * angelegt oder geschrieben. So laesst sich eine Adresse in Loxone Config
+ * pruefen, ohne einen Ladepunkt zu beruehren.
+ * Gelesen erst HINTER der Tokenpruefung: wer sich nicht ausweist, bekommt
+ * dieselbe Antwort wie ohne probe. Nur der Wert 1 gilt; jeder andere wird
+ * abgewiesen, nicht als "kein Trockenlauf" gelesen - sonst ginge ein
+ * vertippter Trockenlauf als echter Befehl hinaus. */
+$ev_probe = false;
+if (isset($_GET['probe'])) {
+    if (!is_string($_GET['probe']) || (string) $_GET['probe'] !== '1') {
+        ev_ende(400, 'EVCC;OK=0;GRUND=PROBE_UNGUELTIG;ERLAUBT=1');
+    }
+    $ev_probe = true;
+}
+
 /* ---------------- Aktion gegen die Weissliste ---------------- */
 $lesend = array('status', 'json', 'roh', 'wert', 'befehle');
 $befehle = ev_befehle();
@@ -218,6 +248,11 @@ $aktion = (isset($_GET['aktion']) && is_string($_GET['aktion']))
 if (!in_array($aktion, array_merge($lesend, $schreibend), true)) {
     ev_ende(400, "EVCC;OK=0;GRUND=UNBEKANNTE_AKTION\n"
                  . 'Erlaubt: ' . implode(', ', array_merge($lesend, $schreibend)));
+}
+/* Ein lesender Aufruf sendet ohnehin nichts; probe=1 dort ist ein
+ * Missverstaendnis und wird gesagt, nicht still uebergangen (EVCC-b1). */
+if ($ev_probe && in_array($aktion, $lesend, true)) {
+    ev_ende(400, 'EVCC;OK=0;GRUND=PROBE_NUR_FUER_BEFEHLE;AKTION=' . $aktion);
 }
 
 /* Wie alt darf der zwischengespeicherte Zustand sein?
@@ -402,14 +437,31 @@ if ($b['pruef'] === 'plan') {
  * Die Sperre bleibt bis zum Ende des Befehls gehalten; zwei gleichzeitige
  * Befehle laufen damit nacheinander, nicht ueber einander. */
 $ev_bremse = ev_tmpdir() . '/befehlsbremse.json';
-$ev_bfh = @fopen($ev_bremse, 'c+');
-if ($ev_bfh === false || !@flock($ev_bfh, LOCK_EX)) {
+/* Im Trockenlauf (EVCC-b1) wird der Merker nur gelesen: fehlt er, ist nichts
+ * gebremst, und er wird NICHT angelegt ($ev_bfh = null). Was den echten
+ * Befehl mit 503 abweisen wuerde - an seiner Stelle liegt keine Datei, oder
+ * er liesse sich nicht anlegen -, weist auch den Trockenlauf ab. */
+if ($ev_probe) {
+    clearstatcache(true, $ev_bremse);
+    if (!file_exists($ev_bremse)) {
+        $ev_bfh = is_writable(dirname($ev_bremse)) ? null : false;
+    } elseif (!is_file($ev_bremse)) {
+        $ev_bfh = false;
+    } else {
+        $ev_bfh = @fopen($ev_bremse, 'r');
+    }
+    $ev_bsperre = LOCK_SH;
+} else {
+    $ev_bfh = @fopen($ev_bremse, 'c+');
+    $ev_bsperre = LOCK_EX;
+}
+if ($ev_bfh === false || ($ev_bfh !== null && !@flock($ev_bfh, $ev_bsperre))) {
     ev_log_wenn_neu('bremse', 'Die Merkerdatei der Befehlsbremse (' . $ev_bremse . ') laesst sich '
         . 'nicht oeffnen - schreibende Befehle werden mit 503 abgewiesen, bis das behoben ist. '
         . 'Pruefen: Platz und Eigentuemer (loxberry).');
     ev_ende(503, 'EVCC;OK=0;AKTION=' . $aktion . ';GRUND=BREMSE_MERKER');
 }
-$ev_bm = json_decode((string) stream_get_contents($ev_bfh), true);
+$ev_bm = ($ev_bfh === null) ? array() : json_decode((string) stream_get_contents($ev_bfh), true);
 if (!is_array($ev_bm)) { $ev_bm = array(); }
 $ev_bschl = $aktion . '|' . ($b['ebene'] === 'lp' ? $lp : 0);
 $ev_bwert = $klar . ($b['pruef'] === 'plan' ? '|' . $std : '');
@@ -432,27 +484,40 @@ if (isset($ev_bm[$ev_bschl]) && is_array($ev_bm[$ev_bschl])) {
  * sendet den Plan, sobald beide bekannt sind - mit dem Vorlauf ab JETZT. */
 if ($b['pruef'] === 'planziel' || $b['pruef'] === 'planstunden') {
     $ev_plan = ev_tmpdir() . '/ladeplan.json';
-    $ev_pfh = @fopen($ev_plan, 'c+');
-    if ($ev_pfh === false || !@flock($ev_pfh, LOCK_EX)) {
-        ev_log_wenn_neu('ladeplan', 'Die Merkerdatei des Ladeplans (' . $ev_plan . ') laesst sich '
-            . 'nicht oeffnen - der Ladeplan wird nicht gesetzt.');
-        ev_ende(503, 'EVCC;OK=0;AKTION=' . $aktion . ';GRUND=PLAN_MERKER');
-    }
-    $ev_pm = json_decode((string) stream_get_contents($ev_pfh), true);
-    if (!is_array($ev_pm)) { $ev_pm = array(); }
     $ev_teil = ($b['pruef'] === 'planziel') ? 'ziel' : 'stunden';
-    $ev_pm[(string) $lp][$ev_teil] = $klar;
-    ftruncate($ev_pfh, 0);
-    rewind($ev_pfh);
-    fwrite($ev_pfh, (string) json_encode($ev_pm));
-    fflush($ev_pfh);
-    flock($ev_pfh, LOCK_UN);
-    fclose($ev_pfh);
+    if ($ev_probe) {
+        /* Trockenlauf (EVCC-b1): der Merker wird nur gelesen; der neue Teil
+         * zaehlt nur fuer diese Antwort. */
+        clearstatcache(true, $ev_plan);
+        if (file_exists($ev_plan) && !is_file($ev_plan)) {
+            ev_ende(503, 'EVCC;OK=0;AKTION=' . $aktion . ';GRUND=PLAN_MERKER');
+        }
+        $ev_pm = is_file($ev_plan) ? json_decode((string) @file_get_contents($ev_plan), true) : array();
+        if (!is_array($ev_pm)) { $ev_pm = array(); }
+        $ev_pm[(string) $lp][$ev_teil] = $klar;
+    } else {
+        $ev_pfh = @fopen($ev_plan, 'c+');
+        if ($ev_pfh === false || !@flock($ev_pfh, LOCK_EX)) {
+            ev_log_wenn_neu('ladeplan', 'Die Merkerdatei des Ladeplans (' . $ev_plan . ') laesst sich '
+                . 'nicht oeffnen - der Ladeplan wird nicht gesetzt.');
+            ev_ende(503, 'EVCC;OK=0;AKTION=' . $aktion . ';GRUND=PLAN_MERKER');
+        }
+        $ev_pm = json_decode((string) stream_get_contents($ev_pfh), true);
+        if (!is_array($ev_pm)) { $ev_pm = array(); }
+        $ev_pm[(string) $lp][$ev_teil] = $klar;
+        ftruncate($ev_pfh, 0);
+        rewind($ev_pfh);
+        fwrite($ev_pfh, (string) json_encode($ev_pm));
+        fflush($ev_pfh);
+        flock($ev_pfh, LOCK_UN);
+        fclose($ev_pfh);
+    }
     $ev_z = isset($ev_pm[(string) $lp]['ziel']) ? (string) $ev_pm[(string) $lp]['ziel'] : '';
     $ev_s = isset($ev_pm[(string) $lp]['stunden']) ? (string) $ev_pm[(string) $lp]['stunden'] : '';
     if ($ev_z === '' || $ev_s === '') {
-        ev_ende(200, 'EVCC;OK=1;AKTION=' . $aktion . ';WERT=' . $klar . ';GEMERKT=1;FEHLT='
-            . ($ev_z === '' ? 'plansoc_ziel' : 'plansoc_stunden'));
+        /* Im Trockenlauf ist nichts gemerkt: GEMERKT=0. */
+        ev_ende(200, 'EVCC;OK=1;AKTION=' . $aktion . ';WERT=' . $klar . ';GEMERKT=' . ($ev_probe ? '0' : '1')
+            . ';FEHLT=' . ($ev_z === '' ? 'plansoc_ziel' : 'plansoc_stunden'));
     }
     $zeit = gmdate('Y-m-d\\TH:i:s\\Z', time() + (int) round((float) $ev_s * 3600));
     $pfad = str_replace(array('%LP%', '%WERT%', '%ZEIT%'),
@@ -462,6 +527,53 @@ if ($b['pruef'] === 'planziel' || $b['pruef'] === 'planstunden') {
         array('%LP%', '%WERT%', '%ZEIT%'),
         array((string) $lp, rawurlencode($klar), rawurlencode($zeit)),
         $b['pfad']);
+}
+
+/* Wurde die Eingabe gerundet? Dann wird es GESAGT.
+ *
+ * Loxone sendet aus einem Analogbaustein zwangslaeufig Kommazahlen. Ein
+ * ganzzahliger Befehl muss sie runden - bis 0.9.28 tat er das STILL.
+ * Gemessen am 10.09.2026: limitsoc=50.5 ging als
+ * /api/loadpoints/1/limitsoc/51 hinaus, in der Antwort stand nur WERT=51.
+ * Abgewiesen wird hier mit Absicht nicht (das machte den Befehl fuer Loxone
+ * unbenutzbar), aber CLAUDE.md Abschnitt 4 verlangt, dass nichts still
+ * zurechtgebogen wird.
+ *
+ * Nur fuer die Befehlsarten, bei denen $klar wirklich dieselbe Zahl ist:
+ * bei 'modus' und 'schalter' ist $klar eine Uebersetzung ('3' -> 'pv'), da
+ * waere ein GERUNDET= irrefuehrend.
+ *
+ * Seit dem Verbesserungsbau 30.09.2026 steht das VOR dem Senden: die
+ * Antwortzeile ist fuer den echten Befehl und den Trockenlauf dieselbe
+ * (EVCC-b1), der Trockenlauf traegt nur PROBE=1 dazu. */
+$gerundet = '';
+if (in_array($b['pruef'], array('ganz', 'plan', 'liste', 'planziel'), true)
+    && is_numeric(str_replace(',', '.', $wert))
+    && (string) $klar !== (string) $wert) {
+    $gerundet = ';GERUNDET=' . str_replace(';', ',', $wert);
+}
+$ev_pz = $ev_probe ? 'PROBE=1;' : '';
+if ($b['pruef'] === 'planziel' || $b['pruef'] === 'planstunden') {
+    // Der Ladeplan nennt beide Teile, aus denen er entstand (C11).
+    $ev_antwort = sprintf("EVCC;OK=1;%sAKTION=%s;WERT=%s%s;ZIEL=%s;STUNDEN=%s;ZEIT=%s\n", $ev_pz, $aktion,
+                          $klar, $gerundet, $ev_z, $ev_s, $zeit);
+} else {
+    $ev_antwort = sprintf("EVCC;OK=1;%sAKTION=%s;WERT=%s%s%s\n", $ev_pz, $aktion, $klar,
+                          $gerundet, $zeit !== '' ? ';ZEIT=' . $zeit : '');
+}
+
+/* Der Trockenlauf endet hier (EVCC-b1): nichts an EVCC, der Bremsmerker
+ * bleibt, wie er war, der Zwischenspeicher auch. */
+if ($ev_probe) {
+    if (is_resource($ev_bfh)) {
+        flock($ev_bfh, LOCK_UN);
+        fclose($ev_bfh);
+    }
+    ev_log_wenn_neu('probe', 'Trockenlauf ' . $aktion . ' (' . $klar . ') fuer '
+        . ($b['ebene'] === 'lp' ? 'Ladepunkt ' . $lp : 'die Anlage')
+        . ' von ' . ev_anrufer() . ' geprueft - nichts gesendet.');
+    echo $ev_antwort;
+    exit;
 }
 
 $a = ev_http($pfad, $b['methode']);
@@ -492,30 +604,4 @@ flock($ev_bfh, LOCK_UN);
 fclose($ev_bfh);
 // Der zwischengespeicherte Zustand ist jetzt veraltet.
 @unlink(ev_tmpdir() . '/state.json');
-/* Wurde die Eingabe gerundet? Dann wird es GESAGT.
- *
- * Loxone sendet aus einem Analogbaustein zwangslaeufig Kommazahlen. Ein
- * ganzzahliger Befehl muss sie runden - bis 0.9.28 tat er das STILL.
- * Gemessen am 10.09.2026: limitsoc=50.5 ging als
- * /api/loadpoints/1/limitsoc/51 hinaus, in der Antwort stand nur WERT=51.
- * Abgewiesen wird hier mit Absicht nicht (das machte den Befehl fuer Loxone
- * unbenutzbar), aber CLAUDE.md Abschnitt 4 verlangt, dass nichts still
- * zurechtgebogen wird.
- *
- * Nur fuer die Befehlsarten, bei denen $klar wirklich dieselbe Zahl ist:
- * bei 'modus' und 'schalter' ist $klar eine Uebersetzung ('3' -> 'pv'), da
- * waere ein GERUNDET= irrefuehrend. */
-$gerundet = '';
-if (in_array($b['pruef'], array('ganz', 'plan', 'liste', 'planziel'), true)
-    && is_numeric(str_replace(',', '.', $wert))
-    && (string) $klar !== (string) $wert) {
-    $gerundet = ';GERUNDET=' . str_replace(';', ',', $wert);
-}
-if ($b['pruef'] === 'planziel' || $b['pruef'] === 'planstunden') {
-    // Der Ladeplan nennt beide Teile, aus denen er entstand (C11).
-    printf("EVCC;OK=1;AKTION=%s;WERT=%s%s;ZIEL=%s;STUNDEN=%s;ZEIT=%s\n", $aktion, $klar,
-           $gerundet, $ev_z, $ev_s, $zeit);
-    exit;
-}
-printf("EVCC;OK=1;AKTION=%s;WERT=%s%s%s\n", $aktion, $klar,
-       $gerundet, $zeit !== '' ? ';ZEIT=' . $zeit : '');
+echo $ev_antwort;

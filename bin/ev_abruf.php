@@ -141,7 +141,9 @@ function ev_durchlauf($laut = false)
     /* Hat ev_zusatz_holen() die Preisvorschau eben erneuert, gilt der Stand
      * DANACH (seit 0.9.34): sonst ging im ersten Lauf nach einem Neustart
      * PREIS_OK=0 hinaus und erst im naechsten der richtige Wert. */
-    if (ev_zusatz_holen()) {
+    /* War EVCC eben nicht abrufbar, keine Zusatzabfragen (EVCC-a1): die
+     * Preisvorschau wird nur aus den gespeicherten Raten neu gerechnet. */
+    if (ev_zusatz_holen(false, empty($st['ok']))) {
         $ev_st2 = json_decode((string) @file_get_contents(ev_tmpdir() . '/state.json'), true);
         if (is_array($ev_st2) && isset($ev_st2['ok'])) { $st = $ev_st2; }
     }
