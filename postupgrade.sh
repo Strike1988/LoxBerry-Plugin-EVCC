@@ -50,6 +50,18 @@ fi
 
 SICHER="$BASE/data/plugins/$PDIR.upgrade_sicherung"
 
+# NUR MIT MARKE ZURUECKSPIELEN (I1, Entscheidung 1). preupgrade.sh legt die
+# Marke als Erstes an; der trap raeumt sie in JEDEM Fall am Ende dieses
+# Skripts ab. Ohne Marke ist das hier kein Update, das dieses Plugin
+# begonnen hat - dann wird nichts eingespielt, die Sicherung bleibt liegen.
+EV_MARKE="$BASE/data/plugins/$PDIR.upgrade_laeuft"
+trap 'rm -f "$EV_MARKE" 2>/dev/null' EXIT
+if [ ! -e "$EV_MARKE" ]; then
+    echo "<WARNING> Es fehlt die Marke einer laufenden Aktualisierung ($EV_MARKE)."
+    echo "<WARNING> Es wird nichts zurueckgespielt; eine Sicherung unter $SICHER bleibt liegen."
+    exit 0
+fi
+
 # Der alte Ort wird noch gelesen: ein abgebrochenes Update von 0.9.0 oder
 # frueher kann dort noch etwas liegen haben.
 if [ ! -d "$SICHER" ] && [ -d "/tmp/${PDIR}_upgrade" ]; then
@@ -73,7 +85,41 @@ if [ -d "$SICHER" ] && [ -n "$(ls -A "$SICHER" 2>/dev/null)" ]; then
                "$BASE/data/plugins/$PDIR.upgrade_sicherung.neu" \
                "$BASE/data/plugins/$PDIR.upgrade_sicherung.alt" 2>/dev/null
         rm -rf "/tmp/${PDIR}_upgrade"
-        echo "<OK> Konfiguration zurueckgestellt."
+        # Den Inhalt pruefen, nicht nur das Kopieren (I7, seit 0.9.34), und
+        # die Zweitschrift aus der zurueckgestellten Datei erneuern (I6): ein
+        # Takt in der Luecke ohne Zweitschrift konnte bis 0.9.33 eine
+        # Zweitschrift mit fremdem Token hinterlassen (Pruefbericht
+        # installer, B10); <OK> stand auch ueber einer kaputten Datei (B11).
+        EV_CF="$BASE/config/plugins/$PDIR/evcc.json"
+        EV_ZS="$BASE/config/plugins/$PDIR.backup.evcc.json"
+        EV_PRUEF=3
+        if command -v php >/dev/null 2>&1; then
+            php -r '$j = json_decode((string) @file_get_contents($argv[1]), true); if (!is_array($j)) { exit(2); } exit((isset($j["aktionstoken"]) && is_string($j["aktionstoken"]) && $j["aktionstoken"] !== "") ? 0 : 1);' "$EV_CF" 2>/dev/null
+            EV_PRUEF=$?
+        fi
+        case "$EV_PRUEF" in
+            0)
+                if ( umask 077 && cp "$EV_CF" "$EV_ZS.neu.$$" ) 2>/dev/null && chmod 0600 "$EV_ZS.neu.$$" \
+                   && mv -f "$EV_ZS.neu.$$" "$EV_ZS" 2>/dev/null; then
+                    echo "<OK> Konfiguration zurueckgestellt, Zweitschrift daraus erneuert."
+                else
+                    rm -f "$EV_ZS.neu.$$" 2>/dev/null
+                    echo "<OK> Konfiguration zurueckgestellt."
+                    echo "<WARNING> Die Zweitschrift $EV_ZS liess sich nicht erneuern."
+                fi
+                ;;
+            1)
+                echo "<OK> Konfiguration zurueckgestellt (ohne Aktionstoken - die Zweitschrift bleibt, wie sie ist)."
+                ;;
+            2)
+                echo "<WARNING> Die zurueckgestellte Konfiguration $EV_CF ist kein gueltiges JSON."
+                echo "<WARNING> Die Oberflaeche und der Abruf heilen sie beim ersten Aufruf aus der Zweitschrift;"
+                echo "<WARNING> die beschaedigte Datei bleibt dann als evcc.json.kaputt liegen."
+                ;;
+            *)
+                echo "<OK> Konfiguration zurueckgestellt (Inhalt nicht geprueft: php fehlt)."
+                ;;
+        esac
     else
         chmod 0600 "$BASE/config/plugins/$PDIR/evcc.json" 2>/dev/null
         echo "<FAIL> Die Konfiguration liess sich NICHT vollstaendig zurueckstellen."

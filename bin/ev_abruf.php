@@ -22,6 +22,29 @@
 
 error_reporting(E_ALL & ~E_DEPRECATED & ~E_NOTICE);
 
+/* NICHT ALS ROOT (C12, seit 0.9.34).
+ *
+ * Ein Lauf als root, solange /tmp/<ordner> fehlt (Zustand nach jedem
+ * Neustart), legte das Verzeichnis, state.json und evcc.log root-eigen an;
+ * danach stand der Cron-Abruf als loxberry bis zum naechsten Neustart still,
+ * ohne eine einzige Protokollzeile (in WSL gemessen, Pruefbericht installer,
+ * B4). Und ohne evcc.json entstanden Konfiguration und Zweitschrift als root.
+ * Deshalb wird abgelehnt, BEVOR irgendetwas angefasst wird, mit dem Aufruf,
+ * der stattdessen gemeint ist. Der Cron und die Deinstallation rufen als
+ * loxberry (cron.01min steigt dazu selbst ab, uninstall ueber su). */
+$ev_uid = function_exists('posix_geteuid') ? posix_geteuid() : null;
+if ($ev_uid === null && DIRECTORY_SEPARATOR === '/' && function_exists('exec')) {
+    $ev_id = @exec('id -u 2>/dev/null');
+    $ev_uid = (is_string($ev_id) && preg_match('/^[0-9]+$/', $ev_id)) ? (int) $ev_id : null;
+}
+if ($ev_uid === 0) {
+    fwrite(STDERR, "EVCC: ev_abruf.php laeuft nicht als root - sonst gehoerten Zwischenspeicher,\n"
+        . "Protokoll und Konfiguration danach root, und der Abruf stuende still.\n"
+        . "Es wurde nichts geholt, nichts gesendet und nichts geschrieben. Aufruf als loxberry:\n"
+        . '  sudo -u loxberry php ' . __FILE__ . ' ' . (isset($argv[1]) ? $argv[1] : 'einmal') . "\n");
+    exit(1);
+}
+
 /* Die Bibliothek finden - nach dem EIGENEN Ablageort, nicht ueber eine feste
  * Zahl von ".." nach oben und nicht ueber eine Reihe von Wetten.
  *
@@ -115,7 +138,13 @@ function ev_durchlauf($laut = false)
      *
      * Die Funktion bremst sich ueber EV_ZUSATZ_ALTER (300 s) selbst; sie
      * fragt also nicht bei jedem Durchlauf nach. */
-    ev_zusatz_holen();
+    /* Hat ev_zusatz_holen() die Preisvorschau eben erneuert, gilt der Stand
+     * DANACH (seit 0.9.34): sonst ging im ersten Lauf nach einem Neustart
+     * PREIS_OK=0 hinaus und erst im naechsten der richtige Wert. */
+    if (ev_zusatz_holen()) {
+        $ev_st2 = json_decode((string) @file_get_contents(ev_tmpdir() . '/state.json'), true);
+        if (is_array($ev_st2) && isset($ev_st2['ok'])) { $st = $ev_st2; }
+    }
     $werte = ev_werte($st);
     $n = ev_mqtt_publish($werte);
     if ($laut) {
@@ -169,20 +198,11 @@ if ($modus !== 'cron') {
  * hierher und nicht an einen Seitenaufruf - die Oberflaeche liest nur
  * noch das Ergebnis. In 0.9.29 hing er am Seitenaufbau und machte die
  * Oberflaeche mit 19 Sekunden unbenutzbar. */
-$ev_kandidatdatei = ev_tmpdir() . '/apt_kandidat.txt';
-clearstatcache(true, $ev_kandidatdatei);
-if (!is_file($ev_kandidatdatei)
-    || (time() - (int) @filemtime($ev_kandidatdatei)) >= 3600) {
-    ev_apt_kandidat(true);
-}
-
-$ev_cronerr = dirname(ev_paths()['log']) . '/cron.err';
-clearstatcache(true, $ev_cronerr);
-if (is_file($ev_cronerr) && filesize($ev_cronerr) > 262144) {
-    $ev_rest = array_slice(file($ev_cronerr, FILE_IGNORE_NEW_LINES) ?: array(), -200);
-    @file_put_contents($ev_cronerr, implode("\n", $ev_rest) . "\n");
-}
-
+/* Beides - die Kandidatenbestimmung und das Kappen von cron.err - steht
+ * seit 0.9.34 HINTER der Sperre (C10). Bis 0.9.33 lief es davor: zwei Takte
+ * in derselben Sekunde (Uhrsprung beim Boot) riefen apt-cache zweimal
+ * gleichzeitig auf, obwohl der Kommentar oben die Sperre davor ankuendigt
+ * (in WSL gemessen, Pruefbericht code, Befund 10; installer, B7). */
 $sperre = ev_tmpdir() . '/abruf.lock';
 $fh = @fopen($sperre, 'c');
 if ($fh === false) {
@@ -199,6 +219,20 @@ if ($fh === false) {
 if (!flock($fh, LOCK_EX | LOCK_NB)) {
     // Ein Lauf ist noch unterwegs - das ist kein Fehler, nur ein Hinweis.
     exit(0);
+}
+
+$ev_kandidatdatei = ev_tmpdir() . '/apt_kandidat.txt';
+clearstatcache(true, $ev_kandidatdatei);
+if (!is_file($ev_kandidatdatei)
+    || (time() - (int) @filemtime($ev_kandidatdatei)) >= 3600) {
+    ev_apt_kandidat(true);
+}
+
+$ev_cronerr = dirname(ev_paths()['log']) . '/cron.err';
+clearstatcache(true, $ev_cronerr);
+if (is_file($ev_cronerr) && filesize($ev_cronerr) > 262144) {
+    $ev_rest = array_slice(file($ev_cronerr, FILE_IGNORE_NEW_LINES) ?: array(), -200);
+    @file_put_contents($ev_cronerr, implode("\n", $ev_rest) . "\n");
 }
 
 $cfg = ev_config();

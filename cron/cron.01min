@@ -16,4 +16,37 @@
 #
 # Und der Aufruf geht ausdruecklich ueber php: fehlt der Datei einmal das
 # Ausfuehrungsrecht, scheiterte der direkte Aufruf ebenso wortlos.
-php REPLACELBPBINDIR/ev_abruf.php cron >/dev/null 2>>REPLACELBPLOGDIR/cron.err
+#
+# SEIT 0.9.34 (I3, Regeln/06):
+#   - Als root von Hand gestartet, gibt die Datei an loxberry ab; gibt es den
+#     Benutzer nicht, geschieht nichts - und nichts entsteht root-eigen
+#     (ev_abruf.php lehnt root ausserdem selbst ab, C12).
+#   - Waehrend einer Aktualisierung (Marke <ordner>.upgrade_laeuft) ruht der
+#     Takt still; postupgrade.sh raeumt die Marke ab.
+#   - Der Protokollordner wird angelegt, sonst scheitert schon die Umlenkung
+#     und php startet gar nicht - ohne Spur (Pruefbericht installer, B5).
+#   - cron.err bekommt ein touch: ein Anhaengen ohne Inhalt frischt die
+#     Aenderungszeit nicht auf (Regeln/06, Abfahrts-Assistent 1.6.10).
+BIN="REPLACELBPBINDIR"
+LOGD="REPLACELBPLOGDIR"
+DATA="REPLACELBPDATADIR"
+
+if [ "$(id -u 2>/dev/null)" = "0" ]; then
+    if id loxberry >/dev/null 2>&1; then
+        exec su -s /bin/bash loxberry -c "$(printf '%q' "$0")"
+    fi
+    echo "EVCC: als root gestartet, einen Benutzer loxberry gibt es nicht - der Abruf laeuft nicht." >&2
+    exit 1
+fi
+
+[ -e "$DATA.upgrade_laeuft" ] && exit 0
+
+ERR="$LOGD/cron.err"
+mkdir -p "$LOGD" 2>/dev/null
+if [ -e "$ERR" ] && [ ! -w "$ERR" ]; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Cron: $ERR ist nicht beschreibbar - Fehlermeldungen des Abrufs gehen verloren." >> "$LOGD/evcc.log" 2>/dev/null
+    ERR=/dev/null
+else
+    touch "$ERR" 2>/dev/null
+fi
+php "$BIN/ev_abruf.php" cron >/dev/null 2>>"$ERR"

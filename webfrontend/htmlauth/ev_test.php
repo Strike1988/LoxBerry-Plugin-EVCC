@@ -36,7 +36,7 @@ function ev_pruefzeile($stand, $frage, $antwort)
 function ev_reiter_abgleich()
 {
     $datei = __DIR__ . '/index.php';
-    if (!is_file($datei)) { return array(-1, 0, 'index.php nicht lesbar'); }
+    if (!is_file($datei)) { return array(-1, 0, ev_t('TEST.A_REITER_NICHT_LESBAR')); }
     $t = (string) @file_get_contents($datei);
 
     /* Das Muster steht als  '/^tab-(settings|mqtt|loxone|test|log)$/'  in der
@@ -57,10 +57,10 @@ function ev_reiter_abgleich()
     $fehlt = array();
     foreach (array_unique(array_merge($liste, $leiste, $bereiche)) as $n) {
         $wo = array();
-        if (!in_array($n, $liste, true))    { $wo[] = 'Positivliste'; }
-        if (!in_array($n, $leiste, true))   { $wo[] = 'Leiste'; }
-        if (!in_array($n, $bereiche, true)) { $wo[] = 'Bereich'; }
-        if ($wo) { $fehlt[] = $n . ' (fehlt in: ' . implode(', ', $wo) . ')'; }
+        if (!in_array($n, $liste, true))    { $wo[] = ev_t('TEST.W_POSITIVLISTE'); }
+        if (!in_array($n, $leiste, true))   { $wo[] = ev_t('TEST.W_LEISTE'); }
+        if (!in_array($n, $bereiche, true)) { $wo[] = ev_t('TEST.W_BEREICH'); }
+        if ($wo) { $fehlt[] = sprintf(ev_t('TEST.W_FEHLT_IN'), $n, implode(', ', $wo)); }
     }
 
     /* Und: entscheidet wirklich der SERVER, welcher Reiter offen ist?
@@ -74,12 +74,10 @@ function ev_reiter_abgleich()
     $mit_aktiv_leiste = preg_match_all('#class="sm-tab<\?[^"]*sm-active#', $t);
     $mit_aktiv_seite = preg_match_all('#class="sm-seite<\?[^"]*sm-active#', $t);
     if ($mit_aktiv_leiste < count($leiste)) {
-        $fehlt[] = sprintf('nur %d von %d Reitern setzen sm-active serverseitig',
-                           $mit_aktiv_leiste, count($leiste));
+        $fehlt[] = sprintf(ev_t('TEST.W_AKTIV_LEISTE'), $mit_aktiv_leiste, count($leiste));
     }
     if ($mit_aktiv_seite < count($bereiche)) {
-        $fehlt[] = sprintf('nur %d von %d Bereichen setzen sm-active serverseitig',
-                           $mit_aktiv_seite, count($bereiche));
+        $fehlt[] = sprintf(ev_t('TEST.W_AKTIV_SEITE'), $mit_aktiv_seite, count($bereiche));
     }
 
     /* Ueber die leere Menge wird nicht geurteilt.
@@ -99,7 +97,20 @@ function ev_reiter_abgleich()
 function ev_pruefungen()
 {
     $cfg = ev_config();
+    $p = ev_paths();
     $z = array();
+
+    /* Wie alt ist der eigene Abruf? VOR der eigenen Anfrage weiter unten
+     * gelesen - die schreibt state.json neu, und das Alter waere immer 0 (O6). */
+    $ev_sf = ev_tmpdir() . '/state.json';
+    clearstatcache(true, $ev_sf);
+    $ev_abruf_alter = is_file($ev_sf) ? max(0, time() - (int) @filemtime($ev_sf)) : -1;
+
+    /* ---- EVCC fragen: EINMAL, mit drei Sekunden Zeitgrenze (O4, seit
+     * 0.9.34). Bis 0.9.33 fragte diese Seite EVCC zweimal mit je 8 s und lief
+     * bei jedem Seitenaufruf (Regeln/04: "Zeitueberschreitung drei Sekunden
+     * statt acht"). Die Zeilen unten lesen diesen einen Stand. ---- */
+    $st = ev_state(true, null, 3);
 
     /* ---- Der eigene Endpunkt. Die wichtigste Zeile dieser Datei. ----
      *
@@ -107,10 +118,9 @@ function ev_pruefungen()
      * 200 mit einer EVCC-Zeile ist gut, alles andere ist ein Befund. Kommt
      * ueberhaupt keine Antwort, ist das KEIN Befund am Plugin - ein Webserver,
      * der nur eine Anfrage zugleich bearbeitet, kann sich waehrend dieser
-     * Seite nicht selbst aufrufen. Dann steht hier ein Hinweis samt Adresse
-     * zum Nachklicken, kein Kreuz. Gemessen im Pruefaufbau: mit dem
-     * eingebauten Webserver von PHP faellt genau dieser Fall an. */
-    list($e_ok, $e_code, $e_text, $e_url) = ev_selbsttest_endpunkt('status');
+     * Seite nicht selbst aufrufen. Er liest den eben geschriebenen
+     * Zwischenspeicher und fragt EVCC nicht noch einmal. */
+    list($e_ok, $e_code, $e_text, $e_url) = ev_selbsttest_endpunkt('status', 3);
     if ($e_ok) {
         $z[] = ev_pruefzeile(1, ev_t('TEST.F_ENDPUNKT'),
             sprintf(ev_t('TEST.A_ENDPUNKT_OK'), (int) $e_code, ev_e(substr($e_text, 0, 60))));
@@ -123,8 +133,7 @@ function ev_pruefungen()
                     ev_e($e_text), ev_e($e_url)));
     }
 
-    /* ---- Findet der Endpunkt seine Bibliothek? Der bessere Hinweistext,
-           wenn die Zeile darueber rot ist. ---- */
+    /* ---- Findet der Endpunkt seine Bibliothek? ---- */
     $kand = ev_endpunkt_kandidaten();
     $treffer = '';
     foreach ($kand as $k) { if (is_file($k)) { $treffer = $k; break; } }
@@ -139,18 +148,62 @@ function ev_pruefungen()
         $r_ok === 1 ? sprintf(ev_t('TEST.A_REITER_OK'), (int) $r_anz)
                     : sprintf(ev_t('TEST.A_REITER_FEHL'), ev_e($r_text)));
 
+    /* ---- Tragen alle Formulare das Merkmal? (O6, Regeln/04 Pflichtzeile) ----
+     * Gezaehlt in der eigenen Datei; eine Null ist kein "in Ordnung". */
+    list($f_n, $f_mit) = ev_formulare_zaehlen();
+    if ($f_n === 0) {
+        $z[] = ev_pruefzeile(0, ev_t('TEST.F_FORMULARE'), ev_t('TEST.A_FORMULARE_BLIND'));
+    } else {
+        $z[] = ev_pruefzeile($f_mit === $f_n ? 1 : 0, ev_t('TEST.F_FORMULARE'),
+            sprintf(ev_t($f_mit === $f_n ? 'TEST.A_FORMULARE_OK' : 'TEST.A_FORMULARE_FEHL'), $f_mit, $f_n));
+    }
+
+    /* ---- Steht der Cron-Eintrag? (O6) An ALLEN Takt-Orten gesucht
+     * (Regeln/04, Raumklima 0.11.8): glob ueber cron.*min. ---- */
+    if ($p['home'] === '') {
+        $z[] = ev_pruefzeile(-1, ev_t('TEST.F_CRON'), ev_t('TEST.A_CRON_ARCHIV'));
+    } else {
+        $ev_cron = array();
+        foreach (array_unique(array($p['plugin'], 'evcc')) as $ev_cn) {
+            foreach ((array) glob($p['home'] . '/system/cron/cron.*min/' . $ev_cn) as $ev_cf) {
+                if (is_string($ev_cf) && $ev_cf !== '') { $ev_cron[] = $ev_cf; }
+            }
+        }
+        $ev_cron = array_values(array_unique($ev_cron));
+        $ev_cdir = array_filter($ev_cron, 'is_dir');
+        if (!$ev_cron) {
+            $z[] = ev_pruefzeile(0, ev_t('TEST.F_CRON'),
+                sprintf(ev_t('TEST.A_CRON_FEHLT'), ev_e($p['home'] . '/system/cron/cron.*min/')));
+        } elseif ($ev_cdir) {
+            $z[] = ev_pruefzeile(0, ev_t('TEST.F_CRON'),
+                sprintf(ev_t('TEST.A_CRON_VERZEICHNIS'), ev_e(implode(', ', $ev_cdir))));
+        } else {
+            $z[] = ev_pruefzeile(1, ev_t('TEST.F_CRON'), sprintf(ev_t('TEST.A_CRON_OK'), ev_e(implode(', ', $ev_cron))));
+        }
+    }
+
+    /* ---- Arbeitet der Abruf noch? Alter des eigenen Abrufs (O6). state.json
+     * wird bei JEDEM Abruf geschrieben, auch bei einem gescheiterten. ---- */
+    $ev_grenze = max(90, 3 * (int) $cfg['takt']);
+    if ($ev_abruf_alter < 0) {
+        $z[] = ev_pruefzeile($p['home'] === '' ? -1 : 0, ev_t('TEST.F_ABRUF_ALTER'), ev_t('TEST.A_ABRUF_NIE'));
+    } else {
+        $z[] = ev_pruefzeile($ev_abruf_alter <= $ev_grenze ? 1 : 0, ev_t('TEST.F_ABRUF_ALTER'),
+            sprintf(ev_t($ev_abruf_alter <= $ev_grenze ? 'TEST.A_ABRUF_OK' : 'TEST.A_ABRUF_ALT'),
+                    $ev_abruf_alter, $ev_grenze));
+    }
+
+    /* ---- Ist die Konfiguration heil? Gelesen VOR der Heilung (O6). ---- */
+    $ev_klage = isset($GLOBALS['ev_konfig_lage_vorher']) ? (string) $GLOBALS['ev_konfig_lage_vorher'] : ev_konfig_lage();
+    $ev_klage_stand = array('ok' => 1, 'token_leer' => -1, 'fehlt' => 0, 'leer' => 0, 'kaputt' => 0, 'ohne_token' => 0);
+    $z[] = ev_pruefzeile(isset($ev_klage_stand[$ev_klage]) ? $ev_klage_stand[$ev_klage] : -1, ev_t('TEST.F_KONFIG'),
+        sprintf(ev_t('TEST.A_KONFIG_' . strtoupper($ev_klage)), ev_e($p['config'])));
+
     /* ---- EVCC selbst ---- */
     if (ev_dienst_vorhanden()) {
         /* Eine Entwicklerfassung ist kein Fehler - aber sie soll nicht
-         * unbemerkt laufen. Am 17.08.2026 hat ein Update 0.315.0-dev
-         * eingespielt, obwohl 0.314.0 angekuendigt war: auf der Maschine war
-         * der nightly-Kanal eingetragen, und apt nimmt die hoechste Fassung
-         * aus allen Quellen. Ein Hinweis, kein Kreuz. */
+         * unbemerkt laufen. Beide Schreibweisen (Tilde und Bindestrich). */
         $ev_fassung = ev_dienst_version();
-        /* Beide Schreibweisen. Gemessen am 17.08.2026: apt fuehrt
-         * 0.315.0~dev.1786876734+3c25327f7 mit TILDE, 'evcc -v' meldet
-         * dieselbe Fassung als 0.315.0-dev+3c25327f7 mit Bindestrich. Wer
-         * nur eine der beiden prueft, sieht die Haelfte. */
         $ev_dev = (stripos($ev_fassung, '-dev') !== false
                    || stripos($ev_fassung, '~dev') !== false
                    || stripos($ev_fassung, 'nightly') !== false);
@@ -166,44 +219,21 @@ function ev_pruefungen()
         ev_t('TEST.F_DIENST'),
         $laeuft ? ev_t('TEST.A_DIENST_LAEUFT') : ev_t('TEST.A_DIENST_TOT'));
 
-    /* ---- Darf die Oberflaeche den Dienst ueberhaupt schalten? ----
-     *
-     * postroot.sh legte die sudo-Regel bis 0.9.10 NUR an, wenn es EVCC selbst
-     * installiert hatte - bei vorhandenem EVCC stieg es vorher aus. Wer EVCC
-     * von Hand installiert hat (ein ausdruecklich unterstuetzter Fall), bekam
-     * drei Knoepfe, die nie wirken konnten. Das laesst sich hier ablesen,
-     * ohne etwas zu schalten. */
-    /* Gemessen wird die WIRKUNG, nicht das Vorhandensein einer Datei.
-     *
-     * Bis 0.9.26 stand hier ein blosses is_file(): eine vorhandene, aber
-     * falsch geschriebene oder auf einen anderen Pfad zeigende Regel ergab
-     * einen gruenen Haken auf eine Frage, die mit "darf" nach der Wirkung
-     * fragt. 'systemctl is-active' ist ein LESENDER Aufruf, der aber durch
-     * dieselbe sudo-Regel muss - er schaltet nichts und beantwortet die
-     * Frage trotzdem. */
+    /* ---- Darf die Oberflaeche den Dienst schalten? Gemessen wird die
+     * WIRKUNG ueber den LESENDEN Unterbefehl 'status', den die sudo-Regel
+     * mit abdeckt. Seit 0.9.34 nur noch hier im Reiter Test (O4). ---- */
     $sudo = '/etc/sudoers.d/loxberry-evcc';
     $ev_sudo_wirkt = -1;
     if (function_exists('exec')) {
-        /* 'status' ist der eine LESENDE Unterbefehl, den die sudo-Regel aus
-         * postroot.sh ausdruecklich mit abdeckt. Er schaltet nichts und muss
-         * trotzdem durch dieselbe Regel - damit misst diese Zeile die
-         * Wirkung, ohne eine zu haben. Beide ueblichen Pfade, genau wie
-         * ev_dienst() sie versucht.
-         *
-         * Nicht 'is-active': das steht NICHT in der Regel und waere auf jeder
-         * richtig eingerichteten Anlage rot geworden. */
         foreach (array('/bin/systemctl', '/usr/bin/systemctl') as $ev_sc) {
             $ev_aus = array();
             $ev_rc = 1;
             @exec('sudo -n ' . $ev_sc . ' status evcc 2>&1', $ev_aus, $ev_rc);
             $ev_txt = strtolower(implode(' ', $ev_aus));
             if (strpos($ev_txt, 'password') !== false || strpos($ev_txt, 'sudo:') !== false) {
-                $ev_sudo_wirkt = 0;      // sudo verlangt etwas - die Regel greift nicht
-                continue;                // der andere Pfad darf es noch richten
+                $ev_sudo_wirkt = 0;
+                continue;
             }
-            // 0 = laeuft, 3 = angehalten. Beides heisst: die Regel hat
-            // getragen. 4 (Unit unbekannt) und 127 (kein systemctl) sagen
-            // ueber die Regel nichts - dann bleibt es bei "nicht feststellbar".
             if ($ev_rc === 0 || $ev_rc === 3) { $ev_sudo_wirkt = 1; break; }
         }
     }
@@ -217,10 +247,7 @@ function ev_pruefungen()
             is_file($sudo) ? ev_t('TEST.A_SUDO_UNKLAR_DA') : ev_t('TEST.A_SUDO_UNKLAR'));
     }
 
-    /* ---- Kann die Oberflaeche EVCC aktualisieren? ----
-     * Ein Hinweis, kein Kreuz: wer die Option nicht eingeschaltet hat,
-     * vermisst nichts. Fehlt aber das Skript, OBWOHL die Option an ist, ist
-     * das ein Befund - der Knopf koennte dann nie wirken. */
+    /* ---- Kann die Oberflaeche EVCC aktualisieren? ---- */
     $ev_lage = ev_update_lage();
     if (empty($cfg['update_ein'])) {
         $z[] = ev_pruefzeile(-1, ev_t('TEST.F_UPDATE'), ev_t('TEST.A_UPDATE_AUS'));
@@ -241,8 +268,7 @@ function ev_pruefungen()
             sprintf(ev_t('TEST.A_UPDATE_BEREIT'), EV_UPDATE_SKRIPT));
     }
 
-    /* ---- Erreichbarkeit ---- */
-    $st = ev_state(true);
+    /* ---- Erreichbarkeit (derselbe Stand wie oben, keine zweite Anfrage) ---- */
     if ($st['ok']) {
         $z[] = ev_pruefzeile(1, ev_t('TEST.F_ERREICHBAR'),
             sprintf(ev_t('TEST.A_ERREICHBAR'), ev_e($cfg['url'])));
@@ -253,13 +279,7 @@ function ev_pruefungen()
 
     /* ---- Laeuft EVCC wirklich, oder antwortet es nur? ----
      *
-     * Diese Zeile steht VOR der Feldzuordnung, weil sie deren Ursache
-     * beantwortet. Ohne sie meldete das Plugin "22 von 22 bestanden",
-     * waehrend keine einzige Zahl ankam.
-     *
-     * Reihenfolge: Startfehler zuerst. Wer bei "nicht eingerichtet" anfaengt,
-     * schickt jemanden in die Grundeinrichtung, dessen Konfiguration laengst
-     * steht und nur wegen eines abgelaufenen Tokens nicht geladen wird. */
+     * Reihenfolge: Startfehler zuerst. */
     $ein = ev_einrichtung($st);
     if (!$st['ok']) {
         $z[] = ev_pruefzeile(-1, ev_t('TEST.F_BETRIEB'), ev_t('TEST.A_BETRIEB_UNBEKANNT'));
@@ -284,16 +304,7 @@ function ev_pruefungen()
                     ev_e($ein['version']), ev_e($ein['neuer'])));
     }
 
-    /* ---- Was wuerde der Knopf WIRKLICH einspielen? ----
-     *
-     * Zwei verschiedene Zahlen, die bis 0.9.28 als eine auftraten. EVCCs
-     * 'availableVersion' ist die neueste STABILE Fassung, die EVCC kennt;
-     * eingespielt wird, was die eingetragene Paketquelle anbietet. Gemessen
-     * am 10.09.2026 standen beide gleichzeitig da: EVCC sagte 0.315.0, apt
-     * haette 0.316.0~dev.1788920311 aus der nightly-Quelle genommen.
-     *
-     * Regeln/12 haelt das seit dem 17.08.2026 fest - das Plugin hielt sich
-     * nur nicht daran. */
+    /* ---- Was wuerde der Knopf WIRKLICH einspielen? ---- */
     if ($ev_lage['kandidat'] !== '') {
         $ev_hoeher = ev_fassung_neuer($ev_lage['kandidat'], $ein['version']);
         $z[] = ev_pruefzeile($ev_hoeher ? -1 : 1, ev_t('TEST.F_APT_KANDIDAT'),
@@ -302,15 +313,15 @@ function ev_pruefungen()
                     ev_e($ev_lage['kandidat'])));
     }
 
-    /* ---- Feldzuordnung: der wichtigste Punkt ----
+    /* ---- Feldzuordnung ----
      *
-     * Die MQTT-Themen von EVCC sind dokumentiert, die genaue Form von
-     * /api/state ist es nicht. Deshalb wird hier nicht behauptet, sondern
-     * nachgesehen, welches Feld sich wirklich aufloesen liess.
-     *
-     * Getrennt gezaehlt wird, was in 0.9.11 aus der Dokumentation kam und an
-     * keiner Anlage gemessen ist. Eine Angabe, die niemand gemessen hat, darf
-     * nicht aussehen wie eine, die jemand gemessen hat. */
+     * KLASSE 8 (O5, seit 0.9.34): Hat EVCC in DIESEM Aufruf nicht
+     * geantwortet, wird ueber die Feldzuordnung nicht geurteilt - bis 0.9.33
+     * standen hier vier Haken ueber Werten aus dem alten Zwischenspeicher,
+     * waehrend zwei Zeilen darueber "Antwortet EVCC? nein" stand
+     * (Pruefbericht oberflaeche, Befund 8). Und "EVCC laeuft" heisst:
+     * geantwortet, kein Startfehler, eingerichtet - ein unbekannter
+     * Einrichtungszustand ist KEIN "laeuft". */
     $werte = ev_werte($st);
     $felder = ev_felder();
     $ohne = array();
@@ -329,31 +340,22 @@ function ev_pruefungen()
             if ($doku) { $mit_doku++; }
         }
     }
-    $ev_laeuft = ($ein['fatal'] === '' && $ein['einrichtung'] !== 0);
-    if (!$ohne) {
+    $ev_antwort = !empty($st['ok']);
+    $ev_kaputt = $ev_antwort && ($ein['fatal'] !== '' || $ein['einrichtung'] === 0);
+    $ev_laeuft = $ev_antwort && $ein['fatal'] === '' && $ein['einrichtung'] === 1;
+    if (!$ev_antwort) {
+        $z[] = ev_pruefzeile(-1, ev_t('TEST.F_FELDER'), ev_t('TEST.A_FELDER_UNBEKANNT'));
+    } elseif (!$ohne) {
         $z[] = ev_pruefzeile(1, ev_t('TEST.F_FELDER'), sprintf(ev_t('TEST.A_FELDER_OK'), $mit));
-    } elseif (!$ev_laeuft) {
-        /* Nicht mit "fehlt ein Geraet, ist das richtig so" beruhigen, wenn
-         * EVCC selbst meldet, dass es gar nicht laeuft. Genau dieser Satz
-         * stand bis 0.9.12 unter 43 nicht aufgeloesten Feldern. */
+    } elseif ($ev_kaputt) {
         $z[] = ev_pruefzeile(0, ev_t('TEST.F_FELDER'),
             sprintf(ev_t('TEST.A_FELDER_KEIN_BETRIEB'), count($ohne)));
     } elseif ($mit === 0) {
-        // Kein einziges Feld aufgeloest, obwohl EVCC laeuft - das ist kein
+        // Kein einziges Feld aufgeloest, obwohl EVCC antwortet - das ist kein
         // fehlendes Geraet mehr, das ist ein Befund.
         $z[] = ev_pruefzeile(0, ev_t('TEST.F_FELDER'),
             sprintf(ev_t('TEST.A_FELDER_KEINS'), count($ohne)));
     } else {
-        /* Ohne Ladepunkt fehlen alle lp*- und fz*-Felder, und der Satz
-         * "fehlt ein Geraet, ist das richtig so" sagt dann das Falsche.
-         * Gemessen an einer Anlage MIT PV, aber ohne Wallbox: 13 von 51
-         * aufgeloest, und alle 23 fehlenden Felder mit lp- oder fz-Praefix
-         * hatten genau diesen einen Grund.
-         *
-         * (In der ersten Fassung stand hier "lp*-Stern-Schraegstrich-fz*" -
-         * die Zeichenfolge Stern-Schraegstrich beendet einen Blockkommentar.
-         * Derselbe Fehler steht mit </script> schon einmal in REGELN_1: ein
-         * Kommentar, der den beschriebenen Fehler selbst begeht.) */
         $ev_text = sprintf(ev_t('TEST.A_FELDER_FEHLEN'), $mit, count($ohne),
                            ev_e(implode(', ', $ohne)));
         if ($ein['ladepunkte'] === 0) {
@@ -361,20 +363,22 @@ function ev_pruefungen()
         }
         $z[] = ev_pruefzeile(-1, ev_t('TEST.F_FELDER'), $ev_text);
     }
-    /* Diese Zeile ist bewusst ein HINWEIS und nie ein Kreuz: dass eine
-     * EVCC-Fassung ein neues Feld nicht kennt, ist kein Defekt des Plugins.
-     * Ein rotes Kreuz, das nichts bedeutet, ist schlimmer als keine Pruefung. */
     $z[] = ev_pruefzeile(-1, ev_t('TEST.F_DOKU'),
-        $anz_doku === 0 ? ev_t('TEST.A_DOKU_KEINE')
+        !$ev_antwort ? ev_t('TEST.A_FELDER_UNBEKANNT')
+        : ($anz_doku === 0 ? ev_t('TEST.A_DOKU_KEINE')
             : sprintf(ev_t('TEST.A_DOKU'), $mit_doku, $anz_doku,
-                      $ohne_doku ? ev_e(implode(', ', $ohne_doku)) : '-'));
+                      $ohne_doku ? ev_e(implode(', ', $ohne_doku)) : '-')));
 
-    /* ---- Die vier Energiemanager-Groessen einzeln ---- */
+    /* ---- Die vier Energiemanager-Groessen einzeln ----
+     * Ohne Antwort in diesem Aufruf: grau, ohne Wert (O5). */
     foreach (array('netz_kw' => 'Gpwr', 'pv_kw' => 'Ppwr',
                    'speicher_kw' => 'Spwr', 'speicher_soc' => 'Soc') as $feld => $anschluss) {
+        if (!$ev_antwort) {
+            $z[] = ev_pruefzeile(-1, sprintf(ev_t('TEST.F_EM_FELD'), $anschluss),
+                sprintf(ev_t('TEST.A_EM_FELD_UNBEKANNT'), $feld));
+            continue;
+        }
         $da = isset($werte[$feld]) && $werte[$feld]['pfad'] !== '';
-        // "Ohne Hausspeicher oder PV-Anlage ist das normal" gilt nur, wenn
-        // EVCC ueberhaupt laeuft. Sonst ist es eine Beschwichtigung.
         $z[] = ev_pruefzeile($da ? 1 : ($ev_laeuft ? -1 : 0),
             sprintf(ev_t('TEST.F_EM_FELD'), $anschluss),
             $da ? sprintf(ev_t('TEST.A_EM_FELD'), $feld, $werte[$feld]['wert'],
@@ -386,19 +390,19 @@ function ev_pruefungen()
     /* ---- Zusatzwerte: Preisvorschau, Prognose, Statistik ---- */
     $roh = isset($st['roh']['lox']) && is_array($st['roh']['lox']) ? $st['roh']['lox'] : array();
     $teile = array();
-    if (isset($roh['preis']['anzahl'])) {
+    if (!empty($roh['preis']['ok']) && isset($roh['preis']['anzahl'])) {
         $teile[] = sprintf(ev_t('TEST.A_ZUSATZ_PREIS'), (int) $roh['preis']['anzahl'],
                            (int) $roh['preis']['rang']);
+    } elseif (isset($roh['preis'])) {
+        $teile[] = ev_t('TEST.A_ZUSATZ_PREIS_KEINE');
     }
     if (isset($roh['prognose']['heute']) && $roh['prognose']['heute'] !== null) {
-        // NICHT durch 1000 teilen: in welcher Einheit EVCC die Prognose
-        // liefert, hat niemand gemessen. Der Rohwert steht hier, damit man
-        // ihn einmal gegen die EVCC-Oberflaeche halten kann.
         $teile[] = sprintf(ev_t('TEST.A_ZUSATZ_PROGNOSE'),
                            ev_e((string) $roh['prognose']['heute']));
     }
     if (!empty($roh['statistik'])) { $teile[] = ev_t('TEST.A_ZUSATZ_STATISTIK'); }
-    $z[] = ev_pruefzeile($teile ? 1 : -1, ev_t('TEST.F_ZUSATZ'),
+    $z[] = ev_pruefzeile($teile ? (isset($roh['preis']) && empty($roh['preis']['ok']) ? -1 : 1) : -1,
+        ev_t('TEST.F_ZUSATZ'),
         $teile ? implode(' &middot; ', $teile) : ev_t('TEST.A_ZUSATZ_LEER'));
 
     /* ---- MQTT ---- */
@@ -416,14 +420,7 @@ function ev_pruefungen()
             sprintf(ev_t('TEST.A_MQTT_OK'), (int) $m['udpport'], ev_e($cfg['mqtt_topic'])));
     }
 
-    /* ---- Token und Steuerung ----
-     *
-     * Drei Ausgaenge, und kein Mustervergleich mehr. Bis 0.9.26 stand hier
-     * '^[A-Za-z0-9]{24,}$' - dasselbe zu enge Muster, das ev_config() dazu
-     * gebracht hat, ein hinterlegtes Token stillschweigend zu ersetzen. Ein
-     * von Hand gesetztes oder aus einer Sicherung zurueckgespieltes Token
-     * taugt; es ist nur schwaecher als ein selbst erzeugtes. Gemeldet wird
-     * das, abgewiesen nicht. */
+    /* ---- Token und Steuerung ---- */
     $ev_tok = (string) $cfg['aktionstoken'];
     if ($ev_tok === '') {
         $z[] = ev_pruefzeile(0, ev_t('TEST.F_TOKEN'), ev_t('TEST.A_TOKEN_LEER'));
@@ -438,12 +435,7 @@ function ev_pruefungen()
     $z[] = ev_pruefzeile(-1, ev_t('TEST.F_STEUERUNG'),
         !empty($cfg['steuerung_ein']) ? ev_t('TEST.A_STEUERUNG_EIN') : ev_t('TEST.A_STEUERUNG_AUS'));
 
-    /* ---- Zweitschrift und beschaedigte Konfiguration ----
-     *
-     * Bis 0.9.10 hat eine abgeschnittene evcc.json die Werkseinstellung
-     * erzeugt UND die intakte Zweitschrift damit ueberschrieben. Beides ist
-     * hier ablesbar, bevor es jemandem passiert. */
-    $p = ev_paths();
+    /* ---- Zweitschrift und beschaedigte Konfiguration ---- */
     $z[] = ev_pruefzeile(is_file($p['sicherung']) ? 1 : -1, ev_t('TEST.F_SICHERUNG'),
         is_file($p['sicherung'])
             ? sprintf(ev_t('TEST.A_SICHERUNG_OK'), date('d.m.Y H:i', (int) filemtime($p['sicherung'])))
@@ -453,10 +445,7 @@ function ev_pruefungen()
             sprintf(ev_t('TEST.A_KAPUTT'), ev_e($p['config'] . '.kaputt')));
     }
 
-    /* ---- Vorlagen wirklich erzeugen und zurueck einlesen ----
-     *
-     * Ein Sonderzeichen in einem Fahrzeugnamen zerlegt sonst die Datei, und
-     * Loxone Config meldet dazu nichts Brauchbares. */
+    /* ---- Vorlagen wirklich erzeugen und zurueck einlesen ---- */
     $vorher = libxml_use_internal_errors(true);
     $kaputt = array();
     $proben = array('VI' => ev_vorlage_ein(), 'VQ' => ev_vorlage_aus());
@@ -473,40 +462,57 @@ function ev_pruefungen()
         $kaputt ? sprintf(ev_t('TEST.A_VORLAGE_FEHL'), ev_e(implode(', ', $kaputt)))
                 : sprintf(ev_t('TEST.A_VORLAGE_OK'), count($proben)));
 
-    /* ---- Ist die Vorlage stabil, auch ohne Zwischenspeicher? ----
-     *
-     * Bis 0.9.10 legte der Zweig "kein Fahrzeugname bekannt" ein Feld weniger
-     * an als der Zweig mit Namen. Gemessen mit zwei Fahrzeugen: 35 Befehle
-     * ohne Zwischenspeicher, 37 mit. Und /tmp ist auf dem LoxBerry eine
-     * Ramdisk - nach jedem Neustart entstand die kurze Fassung. Hier wird
-     * nachgezaehlt, ob beide Zweige gleich viele Felder erzeugen. */
-    $fz_soll = 3 * (int) $cfg['fahrzeuge'];
-    $fz_ist = 0;
-    foreach (array_keys($felder) as $n) {
-        if (preg_match('/^fz[0-9]+_/', $n)) { $fz_ist++; }
+    /* ---- Kachelnamen hoechstens 40 Zeichen (O9, seit 0.9.34) ---- */
+    $ev_kom = 0;
+    $ev_lang = array();
+    foreach ($proben as $paar) {
+        if (preg_match_all('/<Virtual(?:InHttp|Out)Cmd Title="([^"]*)" Comment="([^"]*)"/', $paar[1], $ev_m, PREG_SET_ORDER)) {
+            foreach ($ev_m as $ev_x1) {
+                $ev_kom++;
+                $ev_l = (int) preg_match_all('/./us', html_entity_decode($ev_x1[2], ENT_QUOTES | ENT_XML1, 'UTF-8'));
+                if ($ev_l > 40) { $ev_lang[] = $ev_x1[1] . ' (' . $ev_l . ')'; }
+            }
+        }
     }
-    /* Bei null eingestellten Fahrzeugen gibt es nichts zu vergleichen -
-     * "0 === 0" waere ein Haken ueber einer nicht gestellten Frage. */
-    if ((int) $cfg['fahrzeuge'] === 0) {
+    if ($ev_kom === 0) {
+        $z[] = ev_pruefzeile(-1, ev_t('TEST.F_KURZ'), ev_t('TEST.A_TITEL_LEER'));
+    } else {
+        $z[] = ev_pruefzeile($ev_lang ? 0 : 1, ev_t('TEST.F_KURZ'),
+            $ev_lang ? sprintf(ev_t('TEST.A_KURZ_FEHL'), count($ev_lang), $ev_kom, ev_e(implode(', ', array_slice($ev_lang, 0, 6))))
+                     : sprintf(ev_t('TEST.A_KURZ_OK'), $ev_kom));
+    }
+
+    /* ---- Ist die Vorlage unabhaengig vom Zwischenspeicher? ----
+     *
+     * BEIDE Zweige werden gebildet - ohne Fahrzeugnamen (Ramdisk nach einem
+     * Neustart) und mit so vielen, wie eingestellt sind - und verglichen
+     * (O5, seit 0.9.34). Bis 0.9.33 zaehlte die Zeile nur den gerade
+     * gueltigen Zweig und behauptete "in beiden Faellen"; ein Zweig mit einem
+     * Feld weniger blieb gruen (Pruefbericht oberflaeche, Befund 9). */
+    $ev_fzn = (int) $cfg['fahrzeuge'];
+    if ($ev_fzn === 0) {
         $z[] = ev_pruefzeile(-1, ev_t('TEST.F_VORLAGE_STABIL'),
             ev_t('TEST.A_VORLAGE_STABIL_KEINE'));
     } else {
-        $z[] = ev_pruefzeile($fz_ist === $fz_soll ? 1 : 0, ev_t('TEST.F_VORLAGE_STABIL'),
-            $fz_ist === $fz_soll ? sprintf(ev_t('TEST.A_VORLAGE_STABIL_OK'), $fz_ist)
-                                 : sprintf(ev_t('TEST.A_VORLAGE_STABIL_FEHL'), $fz_ist, $fz_soll));
+        $ev_ohne_n = array();
+        $ev_mit_n = array();
+        $ev_namen = array();
+        for ($ev_i = 1; $ev_i <= $ev_fzn; $ev_i++) { $ev_namen[] = 'probe' . $ev_i; }
+        foreach (array_keys(ev_felder(array())) as $n) {
+            if (preg_match('/^fz[0-9]+_/', $n)) { $ev_ohne_n[] = $n; }
+        }
+        foreach (array_keys(ev_felder($ev_namen)) as $n) {
+            if (preg_match('/^fz[0-9]+_/', $n)) { $ev_mit_n[] = $n; }
+        }
+        $ev_gleich = ($ev_ohne_n === $ev_mit_n) && $ev_ohne_n;
+        $z[] = ev_pruefzeile($ev_gleich ? 1 : 0, ev_t('TEST.F_VORLAGE_STABIL'),
+            $ev_gleich ? sprintf(ev_t('TEST.A_VORLAGE_STABIL_OK'), count($ev_mit_n))
+                       : sprintf(ev_t('TEST.A_VORLAGE_STABIL_FEHL'), count($ev_ohne_n), count($ev_mit_n)));
     }
 
-    /* ---- Sind die Bausteintitel ueber BEIDE Vorlagen eindeutig? ----
-     *
-     * In der Bausteinsuche von Loxone Config fehlt der Geraeteknoten;
-     * Eingaenge und Ausgaenge stehen dort nebeneinander. Gemessen an 0.9.26:
-     * 141 Titel, davon 140 verschieden - das Feld 'entladeregelung' und der
-     * gleichnamige Befehl ergaben zweimal EVCC_ENTLADEREGELUNG. Gefunden hat
-     * das keine Pruefung, sondern ein Abgleich von Hand. Seit 0.9.27 tragen
-     * die Ausgangstitel den Vorsatz SET_; diese Zeile sorgt dafuer, dass es
-     * beim naechsten neuen Feld auffaellt und nicht wieder erst hinterher. */
+    /* ---- Sind die Bausteintitel ueber BEIDE Vorlagen eindeutig? ---- */
     $ev_titel = array();
-    foreach (array(ev_vorlage_ein(), ev_vorlage_aus()) as $ev_paar) {
+    foreach ($proben as $ev_paar) {
         if (preg_match_all('/<VirtualIn(?:Http)?Cmd Title="([^"]*)"/', $ev_paar[1], $ev_m)) {
             $ev_titel = array_merge($ev_titel, $ev_m[1]);
         }
@@ -526,13 +532,7 @@ function ev_pruefungen()
                         : sprintf(ev_t('TEST.A_TITEL_OK'), count($ev_titel)));
     }
 
-    /* ---- Stehen die spaeter hinzugekommenen Felder am Ende? ----
-     *
-     * Bis 0.9.26 nicht: gemessen gegen das Tag-Archiv v0.9.10 sassen 59 neue
-     * Felder ab Stelle 11, und 40 alte standen dahinter. Geschadet hat es
-     * nicht, weil die Befehlserkennung namensbasiert ist - aber jede spaetere
-     * Umsortierung waere teuer geworden. Seit 0.9.27 ist die Tabelle geteilt,
-     * und diese Zeile haelt sie so. */
+    /* ---- Stehen die spaeter hinzugekommenen Felder am Ende? ---- */
     $ev_reihe_fehler = array();
     $ev_spaeter_gesehen = '';
     foreach ($felder as $ev_n => $ev_d) {
@@ -542,7 +542,6 @@ function ev_pruefungen()
         } elseif ($ev_spaeter_gesehen !== '') {
             $ev_reihe_fehler[] = $ev_n;
         }
-        // Ein Feld aus der Dokumentation kann nicht seit 0.9.10 dastehen.
         if ($ev_d['quelle'] === 'doku' && $ev_seit === '0.9.10') {
             $ev_reihe_fehler[] = $ev_n;
         }
@@ -557,12 +556,7 @@ function ev_pruefungen()
                 : sprintf(ev_t('TEST.A_REIHE_OK'), count($felder)));
     }
 
-    /* ---- Hat jede Einstellung eine Regel fuer das Zurueckspielen? ----
-     *
-     * ev_wert_pruefen() faellt geschlossen aus: ein Schluessel ohne Regel
-     * wird beim Zurueckspielen abgelehnt. Das ist richtig - aber wer eine
-     * neue Vorgabe ergaenzt und die Regel vergisst, braeche damit still das
-     * Zurueckspielen. Diese Zeile findet das, bevor es ein Anwender tut. */
+    /* ---- Hat jede Einstellung eine Regel fuer das Zurueckspielen? ---- */
     $ev_ohne_regel = array();
     foreach (ev_vorgaben() as $ev_k => $ev_v) {
         if (!ev_wert_pruefen($ev_k, $ev_v)) { $ev_ohne_regel[] = $ev_k; }
@@ -571,12 +565,7 @@ function ev_pruefungen()
         $ev_ohne_regel ? sprintf(ev_t('TEST.A_SICH_REGELN_FEHL'), ev_e(implode(', ', $ev_ohne_regel)))
                        : sprintf(ev_t('TEST.A_SICH_REGELN_OK'), count(ev_vorgaben())));
 
-    /* ---- Vorlage und Zeile muessen dieselben Feldnamen kennen ----
-     *
-     * Steht in der Vorlage ein Suchmuster, das die Zeile nicht liefert,
-     * bleibt der virtuelle Eingang in Loxone stumm - ohne Fehlermeldung.
-     * Geprueft werden nur die Felder mit zeile = 1; Textfelder stehen
-     * absichtlich nicht in der Zeile. */
+    /* ---- Vorlage und Zeile muessen dieselben Feldnamen kennen ---- */
     $zeile = ev_zeile($werte);
     $fehlend = array();
     foreach (array_keys(ev_felder_zeile()) as $name) {
@@ -588,17 +577,11 @@ function ev_pruefungen()
         $fehlend ? sprintf(ev_t('TEST.A_ABGLEICH_FEHL'), ev_e(implode(', ', $fehlend)))
                  : sprintf(ev_t('TEST.A_ABGLEICH_OK'), count(ev_felder_zeile())));
 
-    /* ---- Und das Suchmuster muss eindeutig sein ----
-     * Jedes Feld steht in der Zeile hinter einem Semikolon. Traefe ';NAME='
-     * mehr als einmal, laese Loxone die falsche Stelle. */
+    /* ---- Und das Suchmuster muss eindeutig sein ---- */
     $doppelt = array();
     foreach (array_keys(ev_felder_zeile()) as $name) {
         if (substr_count($zeile, ';' . strtoupper($name) . '=') > 1) { $doppelt[] = $name; }
     }
-    // Zwei Platzhalter, zwei Argumente. Die erste Fassung dieser Zeile gab
-    // nur eines mit: unter 7.4 eine Warnung, unter 8.x ein
-    // ArgumentCountError - und der toetet die ganze Seite. Gefunden hat es
-    // rendern.py unter 8.4, die ganze Klasse dann sprintf_pruefen.py.
     $ev_zeilenfelder = count(ev_felder_zeile());
     $z[] = ev_pruefzeile($doppelt ? 0 : 1, ev_t('TEST.F_EINDEUTIG'),
         $doppelt ? sprintf(ev_t('TEST.A_EINDEUTIG_FEHL'), ev_e(implode(', ', $doppelt)))
@@ -606,6 +589,25 @@ function ev_pruefungen()
                            $ev_zeilenfelder - count($doppelt), $ev_zeilenfelder));
 
     return $z;
+}
+
+/**
+ * Tragen alle Formulare der Oberflaeche das Merkmal? (O6, Regeln/04)
+ * Gezaehlt in index.php: jeder Block von <form bis </form> muss ev_fmt()
+ * enthalten. Rueckgabe array(Formulare, davon mit Merkmal).
+ */
+function ev_formulare_zaehlen()
+{
+    $t = (string) @file_get_contents(__DIR__ . '/index.php');
+    $n = 0;
+    $mit = 0;
+    if (preg_match_all('#<form\b.*?</form>#is', $t, $m)) {
+        foreach ($m[0] as $f) {
+            $n++;
+            if (strpos($f, 'ev_fmt()') !== false) { $mit++; }
+        }
+    }
+    return array($n, $mit);
 }
 
 /**
@@ -695,10 +697,21 @@ function ev_test_aktion($was)
                                             ev_e($text), ev_e($url)));
 
         case 'mqtt':
-            // Der Knopf sendet ALLES, nicht nur Aenderungen (seit 0.9.33).
+            /* Der Knopf sendet ALLES, nicht nur Aenderungen (seit 0.9.33).
+             * Er meldet, was er weiss: "abgeschickt an den UDP-Eingang <Port>"
+             * - ob das Gateway annimmt, bestaetigt der Eingang nicht (M7, seit
+             * 0.9.34). Bis 0.9.33 hiess es "72 Themen gesendet", auch ohne
+             * lauschendes Gateway (Pruefbericht oberflaeche, Befund 16). */
             $n = ev_mqtt_publish(null, true);
-            return array($n > 0 ? 1 : 0, $n > 0 ? sprintf(ev_t('TEST.M_MQTT_OK'), $n)
-                                                : ev_t('TEST.M_MQTT_FEHL'));
+            $ev_mz = ev_mqtt_zustand();
+            if ($n > 0) {
+                return array(1, sprintf(ev_t('TEST.M_MQTT_OK'), $n, (int) $ev_mz['udpport']));
+            }
+            $ev_g = isset($GLOBALS['ev_mqtt_grund']) ? (string) $GLOBALS['ev_mqtt_grund'] : '';
+            $ev_gk = array('aus' => 'TEST.M_MQTT_AUS', 'kein_port' => 'TEST.M_MQTT_KEIN_PORT',
+                           'udp' => 'TEST.M_MQTT_UDP');
+            return array(0, sprintf(ev_t(isset($ev_gk[$ev_g]) ? $ev_gk[$ev_g] : 'TEST.M_MQTT_FEHL'),
+                                    (int) $ev_mz['udpport']));
 
         case 'token':
             $cfg = ev_config();

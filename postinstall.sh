@@ -1,7 +1,10 @@
 #!/bin/bash
-# Laeuft als Benutzer loxberry, nach postroot.sh - bei der Erstinstallation
-# UND bei jedem Update (vor postupgrade.sh; LoxBerry uebergibt kein
-# Kennzeichen, Regeln/06).
+# Laeuft als Benutzer loxberry, VOR postroot.sh - bei der Erstinstallation
+# UND bei jedem Update (vor postupgrade.sh). Reihenfolge in plugininstall.pl:
+# postinstall :1305, postupgrade :1330, postroot :1358 (Pruefbericht
+# installer, B8; bis 0.9.33 stand hier "nach postroot.sh", I5). EVCC und die
+# sudo-Regel gibt es an dieser Stelle also bei einer Erstinstallation noch
+# nicht. Ob es ein Update ist, sagt die Marke <ordner>.upgrade_laeuft.
 # Argumente: <ZUFALLSKENNUNG> <NAME> <FOLDER> <VERSION> <BASEFOLDER> <TEMPFOLDER>
 ARGV3=$3   # Pluginordner
 ARGV5=$5   # LoxBerry-Basisordner
@@ -66,18 +69,16 @@ if [ -f "$BASE/config/plugins/$PDIR/evcc.json" ]; then
     chmod 0600 "$BASE/config/plugins/$PDIR/evcc.json"
 fi
 
-# Der Schlusssatz haengt an der Lage (seit 0.9.33, Regel aus
-# Bestand-2026-09-18/AUFTRAG_postinstall-hinweis_2026-09-24.md). Bei einem
-# Update laeuft dieses Skript VOR postupgrade.sh; die Einstellungen liegen dann
-# noch in der Upgrade-Sicherung, die preupgrade.sh angelegt hat. Traegt sie ein
-# Zugriffstoken, ist das ein Update einer eingerichteten Anlage, und der Satz
-# "Die Oberflaeche legt beim ersten Aufruf ein Zugriffstoken an" stimmt nicht:
-# das Token ist da, und die Adressen im Miniserver gelten weiter. Bis 0.9.32
-# stand er unbedingt da (Fall P2).
-EV_SICHER="$BASE/data/plugins/$PDIR.upgrade_sicherung/evcc.json"
-if [ -f "$EV_SICHER" ] && grep -Eq '"aktionstoken"[[:space:]]*:[[:space:]]*"[^"]+"' "$EV_SICHER" 2>/dev/null; then
-    echo "<OK> Aktualisierung: Einstellungen und Zugriffstoken liegen in der Upgrade-Sicherung;"
-    echo "<OK> postupgrade.sh spielt sie gleich zurueck. Es ist nichts neu einzutragen."
+# Der Schlusssatz haengt an der MARKE, nicht am Inhalt der Sicherung (I2,
+# seit 0.9.34; Entscheidung 1). Bis 0.9.33 riet er die Lage aus der
+# Upgrade-Sicherung und lag in beiden Richtungen falsch: bei einer
+# Neuinstallation mit liegengebliebener Sicherung versprach er ein
+# Zurueckspielen, das nie kommt (postupgrade.sh laeuft dort nicht), und bei
+# einem Update mit beschaedigter evcc.json kuendigte er ein neues Token an
+# (Pruefbericht installer, B3).
+if [ -f "$BASE/data/plugins/$PDIR.upgrade_laeuft" ]; then
+    echo "<OK> Aktualisierung: postupgrade.sh spielt Einstellungen und Zugriffstoken gleich"
+    echo "<OK> zurueck. Es ist nichts neu einzutragen."
 else
     echo "<OK> Fertig. Die Oberflaeche legt beim ersten Aufruf ein Zugriffstoken an."
 fi

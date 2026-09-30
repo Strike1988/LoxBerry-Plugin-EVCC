@@ -250,6 +250,144 @@ function ev_log_wenn_neu($schluessel, $text)
 function ev_e($s) { return htmlspecialchars((string) $s, ENT_QUOTES, 'UTF-8'); }
 function ev_x($s) { return htmlspecialchars((string) $s, ENT_QUOTES | ENT_XML1, 'UTF-8'); }
 
+/**
+ * Eine Datei ganz schreiben (C7, seit 0.9.34).
+ *
+ * Nebendatei mit PID (<ziel>.neu.<pid>), Rechte VOR dem Inhalt, Laenge und
+ * Ruecklesen pruefen, dann umbenennen (Regeln/03, "atomar schreiben"). Bis
+ * 0.9.33 schrieb ev_config_write() erst den Inhalt nach <ziel>.neu (ohne PID)
+ * und setzte danach 0600: in WSL mit umask 0002 gemessen lag die Nebendatei
+ * mit Aktionstoken und EVCC-Passwort 47-mal mit 664 da, und zwei Schreiber
+ * teilten sich dieselbe Nebendatei (Pruefbericht code, Befund 7).
+ *
+ * Rueckgabe false heisst: am alten Stand hat sich nichts geaendert.
+ * Bauform ap_datei_schreiben() (APC-UPS NG 1.2.14).
+ */
+function ev_datei_schreiben($pfad, $inhalt, $modus = 0600)
+{
+    $inhalt = (string) $inhalt;
+    $ordner = dirname($pfad);
+    if (!is_dir($ordner)) { @mkdir($ordner, 0775, true); }
+    $neben = $pfad . '.neu.' . getmypid();
+    if (file_exists($neben)) { @unlink($neben); }
+    $fh = @fopen($neben, 'xb');          // leer angelegt ...
+    if ($fh === false) { return false; }
+    @chmod($neben, $modus);               // ... sofort geschuetzt ...
+    $n = @fwrite($fh, $inhalt);           // ... dann erst gefuellt
+    $ok = ($n === strlen($inhalt)) && @fflush($fh);
+    $ok = @fclose($fh) && $ok;
+    if ($ok) {
+        clearstatcache(true, $neben);
+        $ok = (@filesize($neben) === strlen($inhalt))
+              && ((string) @file_get_contents($neben) === $inhalt);
+    }
+    if (!$ok || !@rename($neben, $pfad)) {
+        @unlink($neben);
+        return false;
+    }
+    @chmod($pfad, $modus);
+    return true;
+}
+
+/**
+ * Laeuft gerade eine Aktualisierung? (Entscheidung 1 vom 29.09.2026)
+ *
+ * preupgrade.sh legt als Erstes data/plugins/<ordner>.upgrade_laeuft an,
+ * postupgrade.sh raeumt die Marke ueber einen trap ab. Kein Altersvergleich:
+ * eine vergessene Marke gilt (Entscheidung 8, Frage 17). Solange sie liegt,
+ * entsteht kein neues Aktionstoken - in der Luecke zwischen dem Aufraeumen
+ * des Installers und postupgrade.sh fehlt die Konfiguration, und ein Takt
+ * haette dort ohne Zweitschrift ein neues Token gewuerfelt (Pruefbericht
+ * installer, B10).
+ */
+function ev_upgrade_marke()
+{
+    $p = ev_paths();
+    return ($p['home'] !== '') ? $p['home'] . '/data/plugins/' . $p['plugin'] . '.upgrade_laeuft' : '';
+}
+
+function ev_upgrade_laeuft()
+{
+    $m = ev_upgrade_marke();
+    if ($m === '') { return false; }
+    clearstatcache(true, $m);
+    return file_exists($m);
+}
+
+/**
+ * Traegt eine gelesene Konfiguration Inhalt? (C2, seit 0.9.34)
+ *
+ * Inhalt heisst: ein JSON-Objekt MIT dem Schluessel aktionstoken. Bis 0.9.33
+ * galt jede gueltige JSON-Datei als heil; eine Datei ohne Token (von Hand
+ * bearbeitet, von einem fremden Werkzeug geschrieben, '[]') ergab ein neues
+ * Token, und ev_config_write() schrieb es auch in die Zweitschrift - das alte
+ * war aus beiden Dateien verschwunden, ohne Protokollzeile (Pruefbericht code,
+ * Befund 2). Bauart sp_config_hat_inhalt() (Sprachsteuerung 0.11.11).
+ */
+function ev_config_hat_inhalt($cfg)
+{
+    return is_array($cfg) && array_key_exists('aktionstoken', $cfg);
+}
+
+/**
+ * Die Zweitschrift lesen - erst am heutigen Ort, dann am frueheren.
+ * $mit_token: nur eine Zweitschrift mit nicht leerem Aktionstoken zaehlt.
+ * Rueckgabe array(cfg, quelle) oder null.
+ */
+function ev_zweitschrift_lesen($p, $mit_token)
+{
+    foreach (array($p['sicherung'], $p['sicherung_alt']) as $ev_quelle) {
+        if ($ev_quelle === '' || !is_file($ev_quelle)) { continue; }
+        $ev_s = json_decode((string) @file_get_contents($ev_quelle), true);
+        if (!is_array($ev_s) || !$ev_s) { continue; }
+        if ($mit_token && !(isset($ev_s['aktionstoken']) && is_string($ev_s['aktionstoken'])
+                            && $ev_s['aktionstoken'] !== '')) {
+            continue;
+        }
+        return array($ev_s, $ev_quelle);
+    }
+    return null;
+}
+
+/**
+ * Ein neues Aktionstoken ist entstanden - fuer die Oberflaeche festhalten
+ * (C2): sie zeigt es 24 Stunden lang im Reiter Einstellungen an. Die Zeile im
+ * Protokoll schreibt ev_config() selbst.
+ */
+function ev_token_neu_merken($grund)
+{
+    $p = ev_paths();
+    $js = json_encode(array('zeit' => time(), 'grund' => (string) $grund));
+    if ($js !== false) { ev_datei_schreiben($p['datadir'] . '/token_neu.json', $js, 0644); }
+}
+
+/** Rueckgabe array(zeit, grund) oder null, wenn in den letzten 24 h kein Token entstand. */
+function ev_token_neu()
+{
+    $p = ev_paths();
+    $d = @json_decode((string) @file_get_contents($p['datadir'] . '/token_neu.json'), true);
+    if (!is_array($d) || !isset($d['zeit']) || (time() - (int) $d['zeit']) > 86400) { return null; }
+    return array((int) $d['zeit'], isset($d['grund']) ? (string) $d['grund'] : '');
+}
+
+/**
+ * Wie steht die Konfiguration VOR jeder Heilung da? (O6)
+ * Nur lesen - der Reiter Test ruft das auf, bevor ev_config() heilen kann.
+ * Rueckgabe: ok, fehlt, leer, kaputt, ohne_token, token_leer.
+ */
+function ev_konfig_lage()
+{
+    $p = ev_paths();
+    if (!is_file($p['config'])) { return 'fehlt'; }
+    $roh = trim((string) @file_get_contents($p['config']));
+    if ($roh === '' || $roh === '{}') { return 'leer'; }
+    $c = json_decode($roh, true);
+    if (!is_array($c)) { return 'kaputt'; }
+    if (!ev_config_hat_inhalt($c)) { return 'ohne_token'; }
+    if (!is_string($c['aktionstoken']) || $c['aktionstoken'] === '') { return 'token_leer'; }
+    return 'ok';
+}
+
 /* ==================================================================
  * Konfiguration
  * ================================================================== */
@@ -313,6 +451,8 @@ function ev_config($erzeugen = true)
     $ev_geholt = '';
     $ev_defekt = false;
     $ev_hatte_token = false;
+    /* Warum ein neues Token entstuende - fuer Protokoll und Oberflaeche (C2). */
+    $ev_grund = ($roh === '' && !is_file($p['config'])) ? ev_t('LOG.TOKEN_GRUND_NEU') : ev_t('LOG.TOKEN_GRUND_LEER');
 
     if ($roh === '' || $roh === '{}') {
         $ziehen = true;                     // fehlt oder leer - der harmlose Fall
@@ -331,15 +471,29 @@ function ev_config($erzeugen = true)
                  . 'gueltiges JSON (' . json_last_error_msg() . ', '
                  . strlen($roh) . ' Byte). Die Zweitschrift wird gelesen; die '
                  . 'beschaedigte Datei bleibt als .kaputt liegen.');
-            if ($erzeugen && !is_file($p['config'] . '.kaputt')) {
-                @copy($p['config'], $p['config'] . '.kaputt');
-                /* Die Kopie traegt Passwort und Aktionstoken wie das
-                 * Original. copy() legt mit 0666 & ~umask an - ohne diese
-                 * Zeile laege ein Abbild beider Geheimnisse fuer alle lesbar
-                 * im Konfigordner. */
-                @chmod($p['config'] . '.kaputt', 0600);
+        } elseif (!ev_config_hat_inhalt($cfg)) {
+            /* C2 (seit 0.9.34): gueltiges JSON, aber ohne Aktionstoken. Liegt
+             * eine Zweitschrift MIT Token, wird aus ihr geheilt und die Datei
+             * als .kaputt beiseitegelegt. Sonst ist es eine neue Einrichtung
+             * des Tokens: die uebrigen Werte der Datei bleiben, das Token
+             * entsteht unten - gemeldet und protokolliert, nicht still. */
+            if (ev_zweitschrift_lesen($p, true) !== null) {
+                $cfg = null;
+                $ziehen = true;
+                $ev_defekt = true;
+                ev_log_wenn_neu('configinhalt', 'FEHLER: ' . $p['config'] . ' ist gueltiges '
+                     . 'JSON, traegt aber kein Aktionstoken (' . strlen($roh) . ' Byte). Geheilt '
+                     . 'wird aus der Zweitschrift; die Datei bleibt als .kaputt liegen.');
+            } else {
+                $ev_grund = ev_t('LOG.TOKEN_GRUND_OHNE');
             }
         }
+    }
+    if ($ev_defekt && $erzeugen && !is_file($p['config'] . '.kaputt')) {
+        /* Die Kopie traegt Passwort und Aktionstoken wie das Original. Bis
+         * 0.9.33 entstand sie per copy() mit 0666 & ~umask und bekam erst
+         * danach 0600; jetzt Rechte vor dem Inhalt (C7). */
+        ev_datei_schreiben($p['config'] . '.kaputt', $roh, 0600);
     }
 
     if ($ziehen && $cfg === null) {
@@ -348,15 +502,10 @@ function ev_config($erzeugen = true)
          * bestehende Anlage beim Update ihre vorhandene Sicherung.
          * GELESEN, nicht kopiert: zurueckgeschrieben wird erst durch
          * ev_config_write(), und zwar erst nach gelungenem Lesen. */
-        foreach (array($p['sicherung'], $p['sicherung_alt']) as $ev_quelle) {
-            if ($ev_quelle !== '' && is_file($ev_quelle)) {
-                $ev_s = json_decode((string) @file_get_contents($ev_quelle), true);
-                if (is_array($ev_s) && $ev_s) {
-                    $cfg = $ev_s;
-                    $ev_geholt = $ev_quelle;
-                    break;
-                }
-            }
+        $ev_zs = ev_zweitschrift_lesen($p, false);
+        if ($ev_zs !== null) {
+            $cfg = $ev_zs[0];
+            $ev_geholt = $ev_zs[1];
         }
     }
 
@@ -381,30 +530,28 @@ function ev_config($erzeugen = true)
     if ($cfg['mqtt_topic'] === '') { $cfg['mqtt_topic'] = 'evcc2lox'; }
     $cfg['mqtt_vollsend_min'] = max(0, min(1440, (int) $cfg['mqtt_vollsend_min']));
 
-    // Token beim ersten Mal selbst erzeugen und gleich sichern.
-    //
-    // Mit Sperre. Beim ersten Aufruf nach der Einrichtung koennen die
-    // Oberflaeche, der Cron-Abruf und der Miniserver-Endpunkt gleichzeitig
-    // hier ankommen. Ohne Sperre erzeugt jeder ein eigenes Token und
-    // ueberschreibt die anderen - wer sich das Token vorher aus der
-    // Oberflaeche abgeschrieben hat, haelt danach ein ungueltiges in der Hand.
-    /* Ein Token entsteht genau einmal: wenn noch nie eines hinterlegt war.
+    /* Ein Token entsteht genau einmal: wenn noch nie eines hinterlegt war -
+     * und nur bei wirklich neuer Einrichtung (C2, seit 0.9.34).
+     *
+     * Mit Sperre. Beim ersten Aufruf nach der Einrichtung koennen die
+     * Oberflaeche, der Cron-Abruf und der Miniserver-Endpunkt gleichzeitig
+     * hier ankommen. Ohne Sperre erzeugt jeder ein eigenes Token und
+     * ueberschreibt die anderen.
      *
      * Bis 0.9.26 stand hier ein Mustervergleich - was nicht auf
-     * ^[A-Za-z0-9]{24,}$ passte, wurde stillschweigend ersetzt. Gemessen am
-     * Endpunkt (04.09.2026): ein von Hand gesetztes 'kurz123' wirkte beim
-     * ersten Aufruf, war danach ueberschrieben, der zweite Aufruf bekam 403 -
-     * und im Protokoll stand nichts. Jede im Miniserver eingetragene Adresse
-     * wird so stumm ungueltig, denn ein Virtueller Ausgang wertet die 403
-     * nicht aus. Derselbe Weg fuehrt durch das Zurueckspielen einer
-     * Sicherung. Dieselbe Klasse wie VolkswagenID 0.9.10.
+     * ^[A-Za-z0-9]{24,}$ passte, wurde stillschweigend ersetzt (gemessen am
+     * 04.09.2026). Ein VORHANDENER, aber leerer Wert bleibt leer: Leeren ist
+     * der Ausschalter fuer den Endpunkt.
      *
-     * Ein VORHANDENER, aber leerer Wert bleibt leer: Leeren ist der
-     * Ausschalter fuer den Endpunkt, und wer ihn benutzt, will ihn nicht
-     * beim naechsten Seitenaufruf zurueckbekommen. Ob ein hinterlegtes Token
-     * taugt, meldet der Reiter Test - melden ist richtig, stillschweigend
-     * ersetzen nicht. */
-    if (!$ev_hatte_token && $erzeugen) {
+     * Neu in 0.9.34: waehrend einer Aktualisierung (Marke
+     * <ordner>.upgrade_laeuft) entsteht KEIN Token - die Konfiguration kommt
+     * gleich aus der Upgrade-Sicherung zurueck. Entsteht eines, steht das mit
+     * Grund im Protokoll und 24 Stunden lang im Reiter Einstellungen. */
+    if (!$ev_hatte_token && $erzeugen && ev_upgrade_laeuft()) {
+        ev_log_wenn_neu('tokenmarke', 'Eine Aktualisierung laeuft (' . ev_upgrade_marke()
+            . ') - es wird kein neues Aktionstoken angelegt; postupgrade.sh stellt die '
+            . 'Einstellungen gleich zurueck.');
+    } elseif (!$ev_hatte_token && $erzeugen) {
         @mkdir($p['configdir'], 0775, true);
         $sperre = @fopen($p['configdir'] . '/.token.lock', 'c');
         if ($sperre !== false && flock($sperre, LOCK_EX)) {
@@ -412,12 +559,16 @@ function ev_config($erzeugen = true)
             // anderer Prozess schneller, dann wird seines uebernommen.
             $frisch = @json_decode((string) @file_get_contents($p['config']), true);
             if (is_array($frisch) && array_key_exists('aktionstoken', $frisch)
-                && (string) $frisch['aktionstoken'] !== '') {
+                && is_string($frisch['aktionstoken']) && $frisch['aktionstoken'] !== '') {
                 $cfg['aktionstoken'] = (string) $frisch['aktionstoken'];
             } else {
                 try {
                     $cfg['aktionstoken'] = ev_token();
-                    ev_config_write($cfg);
+                    if (ev_config_write($cfg)) {
+                        ev_log('Neues Aktionstoken angelegt (' . $ev_grund . '). Die Adressen '
+                            . 'im Miniserver brauchen es; der Reiter Einbindung in Loxone nennt sie.');
+                        ev_token_neu_merken($ev_grund);
+                    }
                 } catch (RuntimeException $e) {
                     // ev_token bricht ab, wenn das System keinen sicheren
                     // Zufall hat. Dann bleibt das Token leer - der Endpunkt
@@ -431,38 +582,27 @@ function ev_config($erzeugen = true)
     } elseif ($ev_hatte_token && (string) $cfg['aktionstoken'] === '') {
         /* Bestehende Anlage, Token leer: das ist eine Lage, kein Fehler -
          * aber der Betreiber soll sie nicht in Loxone suchen muessen. Eine
-         * Zeile, gebremst ueber den Merker. */
+         * Zeile, gebremst ueber den Merker. Der Knopf liegt im Reiter Test
+         * (bis 0.9.33 nannte die Zeile den Reiter Einstellungen, O11). */
         ev_log_wenn_neu('tokenleer', 'Das Aktionstoken ist leer. Der Endpunkt '
             . 'weist jede Anfrage mit KEIN_TOKEN_EINGERICHTET ab. Ein neues '
-            . 'entsteht im Reiter Einstellungen auf Knopfdruck; von selbst '
-            . 'wird keines nachgelegt, damit ein bewusst geleertes Token '
+            . 'entsteht im Reiter Test auf Knopfdruck ("Token neu erzeugen"); von '
+            . 'selbst wird keines nachgelegt, damit ein bewusst geleertes Token '
             . 'geleert bleibt.');
     }
 
     /* Die Zweitschrift EINMAL zurueckschreiben - und einmal melden.
      *
-     * 0.9.11 hat sie nur gelesen. Damit fehlte evcc.json dauerhaft, jeder
-     * Aufruf zog erneut die Zweitschrift, und jeder Aufruf schrieb eine
-     * Protokollzeile. Gemessen: fuenf Aufrufe, fuenf Zeilen, Datei nicht
-     * wiederhergestellt - und ev_config() laeuft je Endpunktaufruf mehrfach,
-     * der Cron viermal die Minute. Das ist ein Rueckschritt gegenueber
-     * 0.9.10, das die Datei einmal kopiert hat und danach Ruhe gab.
-     *
      * Zurueckgeschrieben wird nur, wo Schreiben erlaubt ist: der unangemeldete
      * Endpunkt legt weiterhin nichts an, er arbeitet mit dem gelesenen Stand.
      * Gemeldet wird ueber ev_log_wenn_neu - der Merker in /tmp haelt auch die
-     * naechsten Prozesse still. */
+     * naechsten Prozesse still.
+     *
+     * Geheilt wird, wenn die Datei fehlt, unbrauchbar ist (kaputt, ohne Token)
+     * oder nur '{}' traegt. Bis 0.9.33 blieb '{}' neben einer Zweitschrift mit
+     * Token fuer immer stehen, und jeder Aufruf zog die Zweitschrift erneut. */
     if ($ev_geholt !== '') {
-        /* Wiederhergestellt wird auch, wenn die Datei DA ist, aber
-         * beschaedigt. Bis 0.9.26 stand hier nur '!is_file(...)': eine
-         * abgeschnittene evcc.json wurde nie geheilt, jeder Aufruf zog erneut
-         * die Zweitschrift, und die Meldung sagte trotzdem
-         * 'und wiederhergestellt'. Gemessen: fuenf Aufrufe, Datei danach
-         * unveraendert kaputt.
-         *
-         * Gemeldet wird, was wirklich geschah - nicht, was vorhatte zu
-         * geschehen. */
-        $ev_heilen = $erzeugen && (!is_file($p['config']) || $ev_defekt);
+        $ev_heilen = $erzeugen && (!is_file($p['config']) || $ev_defekt || $roh === '{}');
         $ev_geheilt = $ev_heilen ? ev_config_write($cfg) : false;
         ev_log_wenn_neu('zweitschrift', 'Konfiguration aus der Zweitschrift '
             . $ev_geholt . ' geholt'
@@ -491,26 +631,18 @@ function ev_config_write($cfg)
     // schriebe dann eine Datei mit NULL Bytes - und meldete das als Erfolg.
     if ($js === false) { return false; }
 
-    $neben = $p['config'] . '.neu';
-    if (@file_put_contents($neben, $js, LOCK_EX) === false) { return false; }
-    @chmod($neben, 0600);
-    if (!@rename($neben, $p['config'])) {
-        @unlink($neben);
-        return false;
-    }
-    // Die Datei traegt Token und moeglicherweise das EVCC-Passwort.
-    @chmod($p['config'], 0600);
+    // Die Datei traegt Token und moeglicherweise das EVCC-Passwort: 0600,
+    // und zwar schon, bevor ein Byte Inhalt darin steht (C7).
+    if (!ev_datei_schreiben($p['config'], $js, 0600)) { return false; }
 
     /* Die Zweitschrift wird erst JETZT erneuert - nach einem vollstaendig
-     * geschriebenen Ziel. Bis 0.9.10 wurde sie auch dann ueberschrieben, wenn
-     * der geschriebene Stand aus blossen Vorgaben bestand, weil die
-     * Konfiguration unlesbar war. Damit war genau die Rettung weg, fuer die
-     * es die Zweitschrift gibt. */
-    $sneben = $p['sicherung'] . '.neu';
-    if (@file_put_contents($sneben, $js, LOCK_EX) !== false) {
-        @chmod($sneben, 0600);
-        if (@rename($sneben, $p['sicherung'])) { @chmod($p['sicherung'], 0600); }
-        else { @unlink($sneben); }
+     * geschriebenen Ziel - und nur mit einem Stand, der ein Aktionstoken
+     * traegt (C2, seit 0.9.34). Bis 0.9.33 ueberschrieb sie jeder
+     * Schreibvorgang, auch einer ohne Token; die Rettung war damit genau in
+     * dem Fall weg, fuer den es sie gibt (Pruefbericht code, Befund 2;
+     * Pruefbericht installer, B10). */
+    if (isset($cfg['aktionstoken']) && is_string($cfg['aktionstoken']) && $cfg['aktionstoken'] !== '') {
+        ev_datei_schreiben($p['sicherung'], $js, 0600);
     }
     return true;
 }
@@ -622,7 +754,7 @@ function ev_netzfehler($text, $url)
  */
 function ev_http_fehlertext($code, $url, $body)
 {
-    $t = 'HTTP ' . (int) $code . ' von ' . $url;
+    $t = sprintf(ev_t('FEHLER.HTTP_VON'), (int) $code, $url);
     $b = trim((string) $body);
     if ($b === '') { return $t; }
     $sagt = '';
@@ -648,7 +780,7 @@ function ev_http_fehlertext($code, $url, $body)
     $sagt = trim(preg_replace('/\s+/', ' ',
         str_replace(array("\r", "\n", "\t"), ' ', $sagt)));
     if ($sagt === '') { return $t; }
-    return $t . ' - EVCC sagt: ' . $sagt;
+    return $t . ' - ' . sprintf(ev_t('FEHLER.EVCC_SAGT'), $sagt);
 }
 
 function ev_http($pfad, $methode = 'GET', $rumpf = null, $zeit = 8)
@@ -673,6 +805,10 @@ function ev_http($pfad, $methode = 'GET', $rumpf = null, $zeit = 8)
             CURLOPT_CONNECTTIMEOUT => min(5, $zeit),
             CURLOPT_HTTPHEADER => $kopf,
             CURLOPT_CUSTOMREQUEST => $methode,
+            // Keiner Umleitung folgen - das Passwort geht sonst an jedes Ziel
+            // (Regeln/03). curl folgt ab Werk ohnehin nicht; hier steht es,
+            // damit beide Wege sichtbar gleich gebaut sind (C4).
+            CURLOPT_FOLLOWLOCATION => false,
         ));
         if ($rumpf !== null) { curl_setopt($ch, CURLOPT_POSTFIELDS, $rumpf); }
         $body = curl_exec($ch);
@@ -690,8 +826,19 @@ function ev_http($pfad, $methode = 'GET', $rumpf = null, $zeit = 8)
                                  : ev_http_fehlertext($code, $url, $body));
     }
 
+    /* Der Ersatzweg ohne php-curl (C4, seit 0.9.34):
+     *   - keiner Umleitung folgen. Bis 0.9.33 folgte file_get_contents einem
+     *     302 und schickte 'Authorization: Bearer <Passwort>' an das neue Ziel
+     *     (in WSL gemessen, Pruefbericht code, Befund 4); curl tat es nicht.
+     *   - die LETZTE Statuszeile gilt (nach einer Umleitung stehen mehrere da).
+     *   - der Verbindungsaufbau bekommt dieselbe Zeitgrenze wie das Lesen:
+     *     'timeout' gilt nur fuers Lesen, fuer den Aufbau gilt
+     *     default_socket_timeout, ab Werk 60 s (Regeln/03, gemessen 8134 ms
+     *     gegen 2108 ms). Er wird fuer diesen Aufruf gesetzt und danach
+     *     zurueckgestellt. */
     $ctx = stream_context_create(array('http' => array(
         'method' => $methode, 'timeout' => $zeit, 'ignore_errors' => true,
+        'follow_location' => 0, 'max_redirects' => 1,
         'header' => implode("\r\n", $kopf),
         'content' => $rumpf === null ? '' : $rumpf,
     )));
@@ -699,18 +846,10 @@ function ev_http($pfad, $methode = 'GET', $rumpf = null, $zeit = 8)
     // ECONNREFUSED, Zeitueberschreitung und EHOSTUNREACH ununterscheidbar,
     // und genau das stand bis 0.9.10 als blosses 'keine Antwort' im Protokoll.
     $vorher = error_get_last();
-    $body = @file_get_contents($url, false, $ctx);
-    $code = 0;
-    $typ = '';
-    if (isset($http_response_header) && is_array($http_response_header)) {
-        if (isset($http_response_header[0])
-            && preg_match('#\s(\d{3})\s#', $http_response_header[0], $m)) {
-            $code = (int) $m[1];
-        }
-        foreach ($http_response_header as $ev_z) {
-            if (stripos($ev_z, 'content-type:') === 0) { $typ = trim(substr($ev_z, 13)); }
-        }
-    }
+    $ev_dst = ini_get('default_socket_timeout');
+    @ini_set('default_socket_timeout', (string) (int) $zeit);
+    list($body, $code, $typ) = ev_http_strom($url, $ctx);
+    if ($ev_dst !== false) { @ini_set('default_socket_timeout', (string) $ev_dst); }
     if ($body === false) {
         $nachher = error_get_last();
         $grund = ($nachher && $nachher !== $vorher) ? (string) $nachher['message'] : '';
@@ -724,12 +863,46 @@ function ev_http($pfad, $methode = 'GET', $rumpf = null, $zeit = 8)
 }
 
 /**
+ * Eine Adresse ueber den Datenstrom abrufen (Ersatzweg ohne php-curl).
+ * Rueckgabe array(Rumpf oder false, HTTP-Code, Content-Type).
+ *
+ * Die Kopfzeilen kommen aus stream_get_meta_data()['wrapper_data'] (C8, seit
+ * 0.9.34). Bis 0.9.33 las das Plugin die vordefinierte Kopfzeilen-Variable
+ * von PHP; 8.5 meldet schon deren blosse Nennung beim Uebersetzen als
+ * ueberholt, auch hinter einer function_exists-Weiche (gemessen an Docker NG
+ * 1.3.9). Entfaellt sie, hiesse jeder Code 0 und jede Antwort Fehlschlag.
+ * Bauform ap_http_abruf() (APC-UPS NG 1.2.14), dk_http_kopf() (Docker NG 1.3.9).
+ */
+function ev_http_strom($url, $ctx)
+{
+    $fh = @fopen($url, 'rb', false, $ctx);
+    if ($fh === false) { return array(false, 0, ''); }
+    $meta = @stream_get_meta_data($fh);
+    $body = @stream_get_contents($fh);
+    @fclose($fh);
+    $kopf = (is_array($meta) && isset($meta['wrapper_data']) && is_array($meta['wrapper_data']))
+        ? $meta['wrapper_data'] : array();
+    $code = 0;
+    $typ = '';
+    foreach ($kopf as $z) {
+        if (!is_string($z)) { continue; }
+        if (preg_match('#^HTTP/\S+\s+([0-9]{3})#', $z, $m)) {
+            $code = (int) $m[1];        // die LETZTE Statuszeile gilt
+            $typ = '';                  // ... und ihre eigenen Kopfzeilen
+        } elseif (stripos($z, 'content-type:') === 0) {
+            $typ = trim(substr($z, 13));
+        }
+    }
+    return array($body === false ? '' : (string) $body, $code, $typ);
+}
+
+/**
  * Zustand von EVCC holen. Cache: eine halbe Taktlaenge, damit mehrere
  * Aufrufe in derselben Sekunde EVCC nicht mehrfach befragen.
  *
  * Rueckgabe: array('ok','stand','fehler','roh' => <dekodiertes JSON>)
  */
-function ev_state($force = false, $hoechstalter = null)
+function ev_state($force = false, $hoechstalter = null, $zeit = 8)
 {
     $cfg = ev_config();
     $cache = ev_tmpdir() . '/state.json';
@@ -749,7 +922,7 @@ function ev_state($force = false, $hoechstalter = null)
         $c = json_decode((string) file_get_contents($cache), true);
         if (is_array($c) && isset($c['ok'])) { return $c; }
     }
-    $a = ev_http('/api/state');
+    $a = ev_http('/api/state', 'GET', null, (int) $zeit);
     $st = array('ok' => 0, 'stand' => 0, 'fehler' => '', 'fehlernr' => 0, 'roh' => array());
     if (!$a['ok']) {
         $st['fehler'] = $a['fehler'];
@@ -788,13 +961,13 @@ function ev_state($force = false, $hoechstalter = null)
                 $c['fehlernr'] = $st['fehlernr'];
                 // 'stand' NICHT anfassen - daraus rechnet der Endpunkt das
                 // Alter, und das soll wachsen.
-                @file_put_contents($cache, json_encode($c));
+                ev_datei_schreiben($cache, (string) json_encode($c), 0664);
                 return $c;
             }
         }
         // Es gibt gar keinen alten Stand. Auch das gehoert festgehalten,
         // sonst fragt jeder Aufruf erneut und laeuft erneut in die Zeitgrenze.
-        @file_put_contents($cache, json_encode($st));
+        ev_datei_schreiben($cache, (string) json_encode($st), 0664);
         return $st;
     }
     $d = json_decode($a['body'], true);
@@ -805,16 +978,31 @@ function ev_state($force = false, $hoechstalter = null)
          * nur 'Antwort ist kein JSON', ohne Code, ohne Typ, ohne Probe. */
         $ev_kopf = trim(substr(preg_replace('/\s+/', ' ', (string) $a['body']), 0, 80));
         $ev_typ = isset($a['typ']) ? (string) $a['typ'] : '';
-        $st['fehler'] = 'Antwort ist kein JSON (HTTP ' . (int) $a['code']
-            . ($ev_typ !== '' ? ', Content-Type ' . $ev_typ : '') . ')'
+        /* Der Satz kommt seit 0.9.34 aus der Sprachdatei (O7): er erreicht
+         * einen Menschen - im Reiter Test, in LETZTER_FEHLER und ueber MQTT. */
+        $st['fehler'] = sprintf(ev_t('FEHLER.KEIN_JSON'), (int) $a['code'])
+            . ($ev_typ !== '' ? sprintf(ev_t('FEHLER.KEIN_JSON_TYP'), $ev_typ) : '')
             . (stripos($ev_typ, 'html') !== false || stripos($ev_kopf, '<html') !== false
-               ? ' - es hat eine Zwischenstelle geantwortet, nicht EVCC.' : '')
-            . ($ev_kopf !== '' ? ' Anfang: ' . $ev_kopf : '');
+               ? ' ' . ev_t('FEHLER.ZWISCHENSTELLE') : '')
+            . ($ev_kopf !== '' ? ' ' . sprintf(ev_t('FEHLER.ANFANG'), $ev_kopf) : '');
         $st['fehlernr'] = 2;
         ev_log_wenn_neu('abruf', $st['fehler']);
         // Auch dieser Stand gehoert in den Zwischenspeicher: sonst fragt jeder
         // Aufruf erneut und laeuft erneut in die Zeitgrenze.
-        @file_put_contents($cache, json_encode($st));
+        /* Seit 0.9.34 bleibt auch hier der alte Stand stehen, entwertet (ok 0,
+         * Fehler dazu) - wie beim ausbleibenden Abruf oben. Bis 0.9.33 warf
+         * eine HTML-Antwort einer Zwischenstelle alle Werte weg; mit dem 503
+         * vor dem ersten Abruf (C5) hiesse das sonst 503 trotz altem Stand
+         * (Entscheidung 8: mit altem Stand 200, OK=0, alte Werte). */
+        $c = is_file($cache) ? json_decode((string) @file_get_contents($cache), true) : null;
+        if (is_array($c) && !empty($c['roh'])) {
+            $c['ok'] = 0;
+            $c['fehler'] = $st['fehler'];
+            $c['fehlernr'] = 2;
+            ev_datei_schreiben($cache, (string) json_encode($c), 0664);
+            return $c;
+        }
+        ev_datei_schreiben($cache, (string) json_encode($st), 0664);
         return $st;
     }
     // EVCC verpackt den Zustand je nach Fassung in 'result'. Beides annehmen.
@@ -825,7 +1013,7 @@ function ev_state($force = false, $hoechstalter = null)
     $ev_alt = is_file($cache) ? json_decode((string) @file_get_contents($cache), true) : null;
     if (is_array($ev_alt) && isset($ev_alt['roh']['lox'])) { $d['lox'] = $ev_alt['roh']['lox']; }
     $st = array('ok' => 1, 'stand' => time(), 'fehler' => '', 'fehlernr' => 0, 'roh' => $d);
-    @file_put_contents($cache, json_encode($st));
+    ev_datei_schreiben($cache, (string) json_encode($st), 0664);
     ev_log_wenn_neu('abruf', 'ok, ' . count($d) . ' Felder');
     return $st;
 }
@@ -926,7 +1114,7 @@ function ev_umrechnen($typ, $wert)
     return null;
 }
 
-function ev_felder()
+function ev_felder($ev_namen_vorgabe = null)
 {
     $cfg = ev_config();
     $f = array();
@@ -1076,11 +1264,11 @@ function ev_felder()
             'text' => 'FELD.PREIS_SCHNITT', 'mqtt' => '', 'quelle' => 'doku');
         $f['preis_rang'] = array(
             'pfade' => array('lox.preis.rang'),
-            'typ' => 'zahl', 'analog' => 1, 'min' => 0, 'max' => 48, 'einheit' => '',
+            'typ' => 'zahl', 'analog' => 1, 'min' => -1, 'max' => 48, 'einheit' => '',
             'text' => 'FELD.PREIS_RANG', 'mqtt' => '', 'quelle' => 'doku');
         $f['preis_stunden'] = array(
             'pfade' => array('lox.preis.anzahl'),
-            'typ' => 'zahl', 'analog' => 1, 'min' => 0, 'max' => 48, 'einheit' => '',
+            'typ' => 'zahl', 'analog' => 1, 'min' => -1, 'max' => 48, 'einheit' => '',
             'text' => 'FELD.PREIS_STUNDEN', 'mqtt' => '', 'quelle' => 'doku');
         $f['preis_guenstigste_stunde'] = array(
             'pfade' => array('lox.preis.beste_stunde'),
@@ -1262,7 +1450,9 @@ function ev_felder()
     /* ---- Fahrzeuge. In /api/state ist 'vehicles' ein Objekt mit dem
             Fahrzeugnamen als Schluessel - eine Nummer gibt es dort nicht.
             Deshalb wird zur Laufzeit aufgeloest (ev_fahrzeugnamen). ---- */
-    $namen = ev_fahrzeugnamen();
+    /* $ev_namen_vorgabe: der Reiter Test bildet damit BEIDE Zweige - ohne
+     * und mit Fahrzeugnamen - und vergleicht sie (O5, seit 0.9.34). */
+    $namen = ($ev_namen_vorgabe !== null) ? array_values($ev_namen_vorgabe) : ev_fahrzeugnamen();
     for ($i = 1; $i <= (int) $cfg['fahrzeuge']; $i++) {
         $name = isset($namen[$i - 1]) ? $namen[$i - 1] : '';
         $fz = 'fz' . $i . '_';
@@ -1339,6 +1529,21 @@ function ev_felder()
         'einheit' => '', 'text' => 'FELD.BETRIEBSBEREIT', 'mqtt' => '');
     $f['letzter_fehler'] = array('pfade' => array(), 'typ' => 'text', 'analog' => 0, 'min' => 0, 'max' => 1,
         'einheit' => '', 'text' => 'FELD.LETZTER_FEHLER', 'mqtt' => '', 'zeile' => 0);
+
+    /* ---- Neu in 0.9.34 (C1): taugt die Preisvorschau? ----
+     *
+     * 1 = die Preise gelten fuer die laufende Stunde (frisch geholt oder aus
+     * einem frueheren Abruf, solange er sie abdeckt), 0 = keine Aussage. Dann
+     * steht PREIS_RANG, PREIS_STUNDEN und PREIS_GUENSTIGSTE_STUNDE auf -1
+     * (HTTP) bzw. '-' (MQTT). Bis 0.9.33 wurde aus einem gescheiterten
+     * Tarifabruf Rang 0 - und "Rang kleiner gleich 6" hiess Dauerfreigabe
+     * (Pruefbericht code, Befund 1). Am ENDE der Tabelle, damit sich die
+     * Reihenfolge der Statuszeile nicht verschiebt. */
+    if (!empty($cfg['tarife_ein'])) {
+        $f['preis_ok'] = array('pfade' => array('lox.preis.ok'), 'typ' => 'bool', 'analog' => 0,
+            'min' => 0, 'max' => 1, 'einheit' => '', 'text' => 'FELD.PREIS_OK', 'mqtt' => '',
+            'quelle' => 'bestand', 'seit' => '0.9.34');
+    }
 
     /* ---- Seit wann gibt es das Feld? ----
      *
@@ -1576,24 +1781,44 @@ function ev_fahrzeugnamen($st = null)
 function ev_werte($st = null)
 {
     if ($st === null) { $st = ev_state(); }
-    $roh = isset($st['roh']) ? $st['roh'] : array();
+    $roh = isset($st['roh']) && is_array($st['roh']) ? $st['roh'] : array();
+    $cfg = ev_config();
     $out = array();
     foreach (ev_felder() as $name => $d) {
         if (empty($d['pfade'])) {
-            $out[$name] = array('wert' => 0, 'pfad' => '');
+            /* Ein Fahrzeugplatz ohne Fahrzeug (fz*): das Feld hat keinen Pfad,
+             * es gibt keine Aussage (M1, seit 0.9.34). Die eigenen Felder (ok,
+             * alter_s, ...) setzt der Schluss dieser Funktion. */
+            $out[$name] = array('wert' => 0, 'pfad' => '',
+                                'ohne' => preg_match('/^fz[0-9]+_/', $name) ? 1 : 0);
             continue;
         }
         list($w, $pfad) = ev_hole($roh, $d['pfade']);
         if ($d['typ'] === 'modus') {
-            $out[$name] = array('wert' => $w === null ? 0 : ev_modus_nr($w), 'pfad' => $pfad);
+            $out[$name] = array('wert' => $w === null ? 0 : ev_modus_nr($w), 'pfad' => $pfad,
+                                'ohne' => $w === null ? 1 : 0);
             continue;
         }
         $u = ev_umrechnen($d['typ'], $w);
-        $out[$name] = array('wert' => $u === null ? 0 : $u, 'pfad' => $pfad);
+        /* 'ohne' = der Abruf lieferte das Feld nicht (M1, C5, seit 0.9.34).
+         * 'wert' bleibt 0 wie bisher; was daraus wird, entscheiden die Ausgaben:
+         * die Statuszeile setzt fuer Zustaende und die Rangzahlen -1
+         * (ev_ohne_minus1()), MQTT sendet einen Zustand einmal als '-'
+         * retained (ev_mqtt_publish()). Nie eine erfundene 0 fuer einen Zustand. */
+        $out[$name] = array('wert' => $u === null ? 0 : $u, 'pfad' => $pfad,
+                            'ohne' => $u === null ? 1 : 0);
     }
-    // Die eigenen Felder.
-    $out['ok'] = array('wert' => (int) (!empty($st['ok'])), 'pfad' => '-');
-    $out['alter_s'] = array('wert' => !empty($st['stand']) ? max(0, time() - (int) $st['stand']) : 99999, 'pfad' => '-');
+    /* Die eigenen Felder.
+     *
+     * OK haengt seit 0.9.34 zusaetzlich am Alter (Entscheidung 4, C6): 0,
+     * sobald der letzte gelungene Abruf aelter ist als 3 x Takt. Bis 0.9.33
+     * lieferte der Endpunkt bei Takt 5 einen bis zu 29 s alten Stand als OK=1
+     * (Pruefbericht code, Befund 6). ALTER_S bleibt unveraendert daneben. */
+    $ev_takt = max(5, min(60, (int) $cfg['takt']));
+    $ev_alter = !empty($st['stand']) ? max(0, time() - (int) $st['stand']) : 99999;
+    $ev_ok = !empty($st['ok']) && $ev_alter <= 3 * $ev_takt;
+    $out['ok'] = array('wert' => $ev_ok ? 1 : 0, 'pfad' => '-');
+    $out['alter_s'] = array('wert' => $ev_alter, 'pfad' => '-');
     /* Ueber MQTT gibt es kein Alter, nur einen Zeitstempel (Regeln/07,
      * Abschnitt 3): ts ist der Zeitpunkt des letzten GELUNGENEN Abrufs in
      * Unix-Sekunden, 0 = noch nie. Er bleibt bei einem Fehlschlag stehen, das
@@ -1611,7 +1836,7 @@ function ev_werte($st = null)
     elseif ($ev_nr === 0 && $ev_ein['einrichtung'] === 0) { $ev_nr = 4; }
     $out['fehler_nr'] = array('wert' => $ev_nr, 'pfad' => '-');
     $out['betriebsbereit'] = array(
-        'wert' => ($ev_ein['fatal'] === '' && $ev_ein['einrichtung'] !== 0 && !empty($st['ok'])) ? 1 : 0,
+        'wert' => ($ev_ein['fatal'] === '' && $ev_ein['einrichtung'] !== 0 && $ev_ok) ? 1 : 0,
         'pfad' => '-');
     /* Der Klartext: der eigene Abruffehler, sonst der Startfehler von EVCC.
      *
@@ -1625,6 +1850,29 @@ function ev_werte($st = null)
     }
     $out['letzter_fehler'] = array('wert' => $ev_klartext, 'pfad' => '-');
     return $out;
+}
+
+/**
+ * Bekommt ein Feld ohne Aussage in der Statuszeile -1 statt 0? (C5, M1, seit 0.9.34)
+ *
+ * Nr. 5/8 der Entscheidungen: Zahlen ohne Aussage gehen als -1 hinaus, weil
+ * Loxone ein '-' als 0 liest. Das gilt fuer
+ *   - die Zustaende der Retain-Tabelle, die eine Zahl sind und deren
+ *     Wertebereich -1 nicht enthaelt (Lademodus, Ladegrenzen, Prioritaet,
+ *     Stromgrenzen, Ladeplan, Speicher-Ladestaende, Batteriemodus ...), und
+ *   - die Rangzahlen der Preisvorschau (PREIS_RANG, PREIS_STUNDEN,
+ *     PREIS_GUENSTIGSTE_STUNDE), Bauliste C1.
+ * NICHT fuer Ja/Nein-Felder: ein Digitaleingang in Loxone kann -1 nicht
+ * darstellen; dort sagen OK und BETRIEBSBEREIT, ob der Wert gilt. Und nicht
+ * fuer Messwerte (Leistungen, Energien): 0 kW eines fehlenden Geraets ist
+ * dort die gewohnte Auskunft, der Reiter Test nennt die fehlenden Felder.
+ */
+function ev_ohne_minus1($name, $d)
+{
+    if (in_array($name, array('preis_rang', 'preis_stunden', 'preis_guenstigste_stunde'), true)) {
+        return true;
+    }
+    return ev_retain_fuer($name) && !empty($d['analog']) && (float) $d['min'] >= 0;
 }
 
 /* ==================================================================
@@ -1662,7 +1910,7 @@ function ev_dienst($befehl)
 {
     $erlaubt = array('start', 'stop', 'restart');
     if (!in_array($befehl, $erlaubt, true)) {
-        return array(0, 'unbekannter Befehl');
+        return array(0, ev_t('FEHLER.UNBEKANNTER_BEFEHL'));
     }
     $aus = array();
     $rc = 0;
@@ -2015,21 +2263,22 @@ function ev_abo_text()
  * retained geht, entscheidet ev_mqtt_publish() zusaetzlich daran, ob EVCC in
  * diesem Lauf geantwortet hat (seit 0.9.33): ohne Antwort sind die Werte
  * Platzhalter oder der alte Stand und gehen fluechtig hinaus, und im Broker
- * bleibt der zuletzt von EVCC gemeldete Stand (Bauart Robonect 1.1.12). Das
- * gilt auch fuer fehler_nr: 0, 4 und 5 meldet EVCC (retained); 1, 2, 3 und 9
- * setzt das Plugin aus seinem eigenen, gescheiterten Abruf (fluechtig) -
- * Regeln/07, Abschnitt 3, Entscheidung vom 19.09.2026: eine Aussage des
- * Dienstes ueber sich selbst ist nie retained.
+ * bleibt der zuletzt von EVCC gemeldete Stand (Bauart Robonect 1.1.12).
+ *
+ * fehler_nr steht seit 0.9.34 NICHT mehr hier (M4). Die 0 sagt zuerst, dass
+ * der Abruf DES PLUGINS gelang; stirbt der Cron, bliebe "kein Fehler"
+ * retained stehen (Pruefbericht mqtt, B4). Ein Ausfallmerker ist nie retained
+ * (Regeln/07, Abschnitt 3, Entscheidung vom 19.09.2026). Der alte Wert im
+ * Broker wird einmal abgeraeumt, mit Bestaetigung (ev_mqtt_altlast()).
  */
 function ev_retain_liste()
 {
     return array(
-        /* Einstellungen der Anlage und das Fehlerflag. */
+        /* Einstellungen der Anlage (fehler_nr seit 0.9.34 nicht mehr, M4). */
         'anlage' => array(
             'netzladen_aktiv' => 1, 'prioritaets_soc' => 1, 'puffer_soc' => 1,
             'residualleistung_w' => 1, 'entladeregelung' => 1,
             'batteriemodus_nr' => 1, 'speicher_kapazitaet_kwh' => 1,
-            'fehler_nr' => 1,
         ),
         /* Je Ladepunkt, ohne die Nummer: lp1_modus_nr, lp2_modus_nr, ... */
         'ladepunkt' => array(
@@ -2077,9 +2326,8 @@ function ev_retain_fuer($name, $nutzlast = null)
  * wieder ausgeliefert. Seit 0.9.33:
  *   lpN_pv_warten_min, lpN_phasen_warten_min - bis 0.9.32 retained; jeder
  *       zurueckbehaltene Wert ist ein Altwert.
- *   fehler_nr - 0, 4 und 5 meldet EVCC selbst, sie duerfen stehen bleiben;
- *       1, 2, 3 und 9 setzte eine Vorfassung aus ihrem eigenen, gescheiterten
- *       Abruf retained und sind Altwerte.
+ *   fehler_nr - seit 0.9.34 ganz fluechtig (M4): JEDER zurueckbehaltene Wert
+ *       ist ein Altwert. Bis 0.9.33 galten 0, 4 und 5 als erlaubt.
  * Mit $werte nur die Themen, die in diesem Lauf einen Wert haben - abgeraeumt
  * wird unmittelbar vor dem gueltigen Wert, nie ohne ihn.
  */
@@ -2090,7 +2338,7 @@ function ev_mqtt_altlast_liste($werte = null)
         $l['lp' . $i . '_pv_warten_min'] = array();
         $l['lp' . $i . '_phasen_warten_min'] = array();
     }
-    $l['fehler_nr'] = array('0', '4', '5');
+    $l['fehler_nr'] = array();
     if ($werte !== null) {
         foreach (array_keys($l) as $n) {
             if (!isset($werte[$n])) { unset($l[$n]); }
@@ -2277,9 +2525,11 @@ function ev_mqtt_behalten_liste(array $themen)
  * Senden: ueber den UDP-Eingang ist "gesendet" nicht "geloescht" (Regeln/07,
  * Z. 215, am Geraet belegt).
  *
- * Der Merker traegt die Kennung "leer-bestaetigt <praefix>: <Themenliste>":
- * ein anderes Praefix oder eine andere Zahl von Ladepunkten gilt nicht, und
- * keine Vorfassung hat eine Datei dieses Namens angelegt. purge_installation
+ * Der Merker traegt die Kennung "leer-bestaetigt-0934 <praefix>: <Themenliste>":
+ * ein anderes Praefix oder eine andere Zahl von Ladepunkten gilt nicht. Die
+ * Fassungskennung ist seit 0.9.34 dabei, weil fehler_nr seither mit JEDEM
+ * Wert Altlast ist - ein Merker von 0.9.33 bestaetigte nur "nichts ausser 0,
+ * 4, 5". purge_installation
  * raeumt ihn bei jedem Update mit dem Datenordner ab; dann wird einmal
  * nachgefragt.
  */
@@ -2291,7 +2541,7 @@ function ev_mqtt_altlast($praefix, $werte = null)
     if (!$liste) { return array('lage' => 'erledigt', 'themen' => array()); }
     $p = ev_paths();
     $merker = $p['datadir'] . '/retain_altlast_bestaetigt';
-    $kennung = 'leer-bestaetigt ' . $praefix . ': ' . implode(' ', array_keys($liste));
+    $kennung = 'leer-bestaetigt-0934 ' . $praefix . ': ' . implode(' ', array_keys($liste));
     if (is_file($merker) && trim((string) @file_get_contents($merker)) === $kennung) {
         return array('lage' => 'erledigt', 'themen' => array());
     }
@@ -2375,32 +2625,66 @@ function ev_mqtt_leer_themen()
 function ev_mqtt_leeren($runden = 3, $pause_us = 1000000)
 {
     $c = ev_config(false);
-    $w = ev_mqtt_thema($c['mqtt_topic']);
+    $jetzt = ev_mqtt_thema($c['mqtt_topic']);
+    /* Seit 0.9.34 (M3): ALLE je benutzten Praefixe, nicht nur das
+     * eingestellte. Nach einem Praefixwechsel blieben bis 0.9.33 die
+     * Zustaende unter dem alten Praefix fuer immer im Broker; keine Aktion der
+     * Linie erreichte sie, auch die Deinstallation nicht (Pruefbericht mqtt,
+     * B3, Fall F14: 42 Themen). */
+    $praefixe = array_values(array_unique(array_merge(array($jetzt), ev_mqtt_praefixe())));
+    $rc = 0;
+    foreach ($praefixe as $w) {
+        $themen = array();
+        foreach (ev_mqtt_leer_themen() as $t) { $themen[] = ev_mqtt_thema($w . '/' . $t); }
+        list($r, $zeilen) = ev_mqtt_leeren_themen($themen, $w, $runden, $pause_us);
+        foreach ($zeilen as $z) { echo $z . "\n"; }
+        $rc = max($rc, $r);
+    }
+    return $rc;
+}
+
+/**
+ * Zurueckbehaltene Themen leeren (M3, seit 0.9.34 als eigene Funktion).
+ *
+ * Geloescht wird ueber den UDP-Eingang des Gateways, "retain <thema> " mit
+ * leerer Nutzlast. VOR der ersten Runde und nach jeder wird der Broker
+ * gefragt (ev_mqtt_behalten_liste()); hinaus geht nur, was dort noch steht,
+ * hoechstens $runden Runden. Steht nichts da, geht nichts hinaus. Ist der
+ * Broker nicht zu fragen, gehen alle Themen in jeder Runde hinaus, und das
+ * Ergebnis sagt, dass nicht nachgelesen wurde - der Eingang verwirft unter
+ * Last Datagramme (Regeln/07), ein blosses Senden ist kein Beleg. Bauart
+ * bw_mqtt_leeren() (Beschattungswaechter 0.9.21).
+ *
+ * Rueckgabe array(rc, Zeilen fuer das Installationsprotokoll, offen, nachgelesen):
+ * rc 0 geleert oder nicht nachpruefbar, 1 es steht noch etwas bzw. der
+ * Eingang war nicht erreichbar, 2 nicht moeglich.
+ */
+function ev_mqtt_leeren_themen(array $alle, $w, $runden = 3, $pause_us = 1000000)
+{
+    $zeilen = array();
     $z = ev_mqtt_zustand();
     if (!$z['udpport']) {
-        echo '<INFO> MQTT: in der general.json steht kein UDP-Eingangsport des Gateways - '
-           . 'zurueckbehaltene Themen unter ' . $w . '/ wurden nicht geleert.' . "\n";
-        return 2;
+        $zeilen[] = '<INFO> MQTT: in der general.json steht kein UDP-Eingangsport des Gateways - '
+                  . 'zurueckbehaltene Themen unter ' . $w . '/ wurden nicht geleert.';
+        return array(2, $zeilen, $alle, false);
     }
-    $alle = array();
-    foreach (ev_mqtt_leer_themen() as $t) { $alle[] = ev_mqtt_thema($w . '/' . $t); }
     $n = count($alle);
     $f = ev_mqtt_behalten_liste($alle);
     $nachgelesen = ($f['lage'] === 'ok');
     $offen = $nachgelesen ? array_keys($f['belegt']) : $alle;
     if ($nachgelesen && !$offen) {
-        echo '<OK> MQTT: der Broker bestaetigt: keines der ' . $n . ' Themen unter ' . $w
-           . '/ steht zurueckbehalten - nichts zu leeren.' . "\n";
-        return 0;
+        $zeilen[] = '<OK> MQTT: der Broker bestaetigt: keines der ' . $n . ' Themen unter ' . $w
+                  . '/ steht zurueckbehalten - nichts zu leeren.';
+        return array(0, $zeilen, array(), true);
     }
     $eno = 0;
     $etxt = '';
     $fp = @stream_socket_client('udp://127.0.0.1:' . (int) $z['udpport'], $eno, $etxt, 2);
     if (!$fp) {
-        echo '<WARNING> MQTT: der UDP-Eingang des Gateways ist nicht erreichbar (Port '
-           . (int) $z['udpport'] . ') - zurueckbehaltene Themen unter ' . $w
-           . '/ wurden nicht geleert.' . "\n";
-        return 1;
+        $zeilen[] = '<WARNING> MQTT: der UDP-Eingang des Gateways ist nicht erreichbar (Port '
+                  . (int) $z['udpport'] . ') - zurueckbehaltene Themen unter ' . $w
+                  . '/ wurden nicht geleert.';
+        return array(1, $zeilen, $offen, $nachgelesen);
     }
     $zu_leeren = count($offen);
     $datagramme = 0;
@@ -2411,7 +2695,9 @@ function ev_mqtt_leeren($runden = 3, $pause_us = 1000000)
         foreach ($offen as $t) {
             // Ein Leerzeichen hinter dem Thema, sonst keine Nutzlast: die
             // Form, die das Gateway als Loeschung liest (Regeln/07, Nachtrag
-            // 19.09.2026: mqttgateway.pl:281, :311-315, :357).
+            // 19.09.2026: mqttgateway.pl:281, :311-315, :357). 5 ms Abstand
+            // zwischen den Datagrammen eines Stosses (M5).
+            if ($datagramme > 0) { usleep(5000); }
             if (@fwrite($fp, 'retain ' . $t . ' ') !== false) { $datagramme++; }
         }
         usleep(300000);     // dem Gateway Zeit bis zum Broker lassen
@@ -2424,35 +2710,152 @@ function ev_mqtt_leeren($runden = 3, $pause_us = 1000000)
         }
     }
     fclose($fp);
-    echo '<INFO> MQTT: ' . $zu_leeren . ' von ' . $n . ' Themen unter ' . $w . '/ mit leerer Nutzlast '
-       . 'an den UDP-Eingang ' . (int) $z['udpport'] . ' des Gateways gesendet (' . $gelaufen
-       . ' Runde(n), ' . $datagramme . ' Datagramme).' . "\n";
+    $zeilen[] = '<INFO> MQTT: ' . $zu_leeren . ' von ' . $n . ' Themen unter ' . $w . '/ mit leerer Nutzlast '
+              . 'an den UDP-Eingang ' . (int) $z['udpport'] . ' des Gateways gesendet (' . $gelaufen
+              . ' Runde(n), ' . $datagramme . ' Datagramme).';
     if ($nachgelesen && !$offen) {
-        echo '<OK> MQTT: der Broker bestaetigt: keines der ' . $n . ' Themen steht mehr '
-           . 'zurueckbehalten.' . "\n";
-        return 0;
+        $zeilen[] = '<OK> MQTT: der Broker bestaetigt: keines der ' . $n . ' Themen unter ' . $w
+                  . '/ steht mehr zurueckbehalten.';
+        return array(0, $zeilen, array(), true);
     }
     if ($nachgelesen) {
-        echo '<WARNING> MQTT: ' . count($offen) . ' Themen stehen noch zurueckbehalten im Broker ('
-           . implode(', ', array_slice($offen, 0, 5)) . (count($offen) > 5 ? ', ...' : '')
-           . '). Von Hand: mosquitto_pub -r -n -t <thema> (mit den Broker-Zugangsdaten).' . "\n";
-        return 1;
+        $zeilen[] = '<WARNING> MQTT: ' . count($offen) . ' Themen stehen noch zurueckbehalten im Broker ('
+                  . implode(', ', array_slice($offen, 0, 5)) . (count($offen) > 5 ? ', ...' : '')
+                  . '). Von Hand: mosquitto_pub -r -n -t <thema> (mit den Broker-Zugangsdaten).';
+        return array(1, $zeilen, $offen, true);
     }
-    echo '<INFO> MQTT: der Broker liess sich nicht befragen - nicht nachgelesen. Der UDP-Eingang '
-       . 'verwirft unter Last Datagramme; was stehen bleibt, laesst sich mit '
-       . 'mosquitto_pub -r -n -t <thema> von Hand loeschen.' . "\n";
-    return 0;
+    $zeilen[] = '<INFO> MQTT: der Broker liess sich nicht befragen - nicht nachgelesen. Der UDP-Eingang '
+              . 'verwirft unter Last Datagramme; was stehen bleibt, laesst sich mit '
+              . 'mosquitto_pub -r -n -t <thema> von Hand loeschen.';
+    return array(0, $zeilen, $offen, false);
 }
 
 /**
- * Das Lebenszeichen: geht in JEDEM Lauf hinaus, auch unveraendert, und nie
- * retained (Regeln/07, Abschnitt 3). Alles andere nur bei Aenderung und im
- * Vollversand (ev_mqtt_publish()).
+ * Abraeumen aus der Oberflaeche (M3, seit 0.9.34): beim Praefixwechsel das
+ * ALTE Praefix, beim Abschalten das eingestellte, beim Verkleinern der Zahl
+ * der Ladepunkte oder Fahrzeuge die nicht mehr gesendeten lpN_/fzN_-Themen.
+ * $kurz: Themen ohne Praefix; null = alle, die die Linie je retained sandte.
+ * Rueckgabe array(rc, Satz fuer die Einmalmeldung).
+ */
+function ev_mqtt_abraeumen($praefix, $kurz = null)
+{
+    $w = ev_mqtt_thema($praefix);
+    if ($w === '') { return array(2, ''); }
+    if ($kurz === null) { $kurz = ev_mqtt_leer_themen(); }
+    if (!$kurz) { return array(0, ''); }
+    $voll = array();
+    foreach ($kurz as $t) { $voll[] = ev_mqtt_thema($w . '/' . $t); }
+    list($rc, $zeilen, $offen, $nachgelesen) = ev_mqtt_leeren_themen($voll, $w, 3, 300000);
+    /* Die Sendeliste gilt danach nicht mehr: sie haelt fest, was als retained
+     * gesendet ist, und der naechste Lauf schickte sonst nur Aenderungen - nach
+     * einem Wiedereinschalten stuende bis zum naechsten Vollversand kein
+     * Zustand im Broker (am Bau gemessen, ui_win.py Fall praefix). */
+    @unlink(ev_mqtt_gesendet_datei());
+    ev_log('MQTT abraeumen unter ' . $w . '/: ' . preg_replace('/<[A-Z]+> /', '', implode(' ', $zeilen)));
+    if ($rc === 2) {
+        return array(2, sprintf(ev_t('MQTT.ABRAEUMEN_KEIN_PORT'), ev_e($w)));
+    }
+    if ($nachgelesen && !$offen) {
+        return array(0, sprintf(ev_t('MQTT.ABRAEUMEN_OK'), count($voll), ev_e($w)));
+    }
+    if ($nachgelesen) {
+        return array(1, sprintf(ev_t('MQTT.ABRAEUMEN_REST'), count($offen), ev_e($w),
+                                ev_e(implode(', ', array_slice($offen, 0, 5)))));
+    }
+    return array($rc, sprintf(ev_t('MQTT.ABRAEUMEN_UNBEKANNT'), count($voll), ev_e($w)));
+}
+
+/**
+ * Was ist nach einer Aenderung der Einstellungen abzuraeumen? (M3)
+ * EINE Stelle fuer Speichern, Reiter MQTT und Zurueckspielen einer Sicherung:
+ *   - anderes Praefix       -> das ALTE Praefix ganz,
+ *   - MQTT abgeschaltet     -> das eingestellte Praefix ganz,
+ *   - weniger Ladepunkte/Fahrzeuge -> deren Themen.
+ * Rueckgabe: Liste von array(rc, Satz). Aufzurufen NACH dem Schreiben der
+ * neuen Konfiguration.
+ */
+function ev_mqtt_abraeumen_nach($alt, $neu)
+{
+    $aus = array();
+    $at = ev_mqtt_thema((string) $alt['mqtt_topic']);
+    $nt = ev_mqtt_thema((string) $neu['mqtt_topic']);
+    if ($at !== '' && $at !== $nt) {
+        $aus[] = ev_mqtt_abraeumen($at);
+    } elseif (!empty($alt['mqtt_ein']) && empty($neu['mqtt_ein'])) {
+        $aus[] = ev_mqtt_abraeumen($nt);
+    } elseif (!empty($neu['mqtt_ein'])
+              && ((int) $neu['ladepunkte'] < (int) $alt['ladepunkte']
+                  || (int) $neu['fahrzeuge'] < (int) $alt['fahrzeuge'])) {
+        $aus[] = ev_mqtt_abraeumen($nt, ev_mqtt_themen_ueber((int) $neu['ladepunkte'], (int) $neu['fahrzeuge']));
+    }
+    return $aus;
+}
+
+/** Die retained Themen der Ladepunkte und Fahrzeuge oberhalb der neuen Zahl (M3). */
+function ev_mqtt_themen_ueber($ladepunkte, $fahrzeuge)
+{
+    $l = ev_retain_liste();
+    $t = array();
+    for ($i = (int) $ladepunkte + 1; $i <= EV_LADEPUNKTE; $i++) {
+        foreach (array_keys($l['ladepunkt']) as $k) { $t[] = 'lp' . $i . '_' . $k; }
+    }
+    for ($i = (int) $fahrzeuge + 1; $i <= EV_FAHRZEUGE; $i++) {
+        foreach (array_keys($l['fahrzeug']) as $k) { $t[] = 'fz' . $i . '_' . $k; }
+    }
+    return $t;
+}
+
+/**
+ * Die Liste der je benutzten Praefixe (M3, seit 0.9.34). Sie liegt NEBEN dem
+ * Datenordner (data/plugins/<ordner>.mqtt_praefixe.json): der Installer
+ * raeumt data/plugins/<ordner>/ bei jedem Update ab (Regeln/03, "Ein Merker,
+ * der ein Upgrade ueberleben soll"). Die Deinstallation liest sie und raeumt
+ * sie danach weg.
+ */
+function ev_mqtt_praefixe_datei()
+{
+    $p = ev_paths();
+    return ($p['home'] !== '') ? $p['home'] . '/data/plugins/' . $p['plugin'] . '.mqtt_praefixe.json' : '';
+}
+
+function ev_mqtt_praefixe()
+{
+    $f = ev_mqtt_praefixe_datei();
+    if ($f === '' || !is_file($f)) { return array(); }
+    $l = json_decode((string) @file_get_contents($f), true);
+    $aus = array();
+    if (is_array($l)) {
+        foreach ($l as $x) {
+            if (is_string($x) && ev_mqtt_thema($x) === $x && $x !== '') { $aus[] = $x; }
+        }
+    }
+    return array_values(array_unique($aus));
+}
+
+function ev_mqtt_praefix_merken($praefix)
+{
+    $f = ev_mqtt_praefixe_datei();
+    $w = ev_mqtt_thema($praefix);
+    if ($f === '' || $w === '') { return; }
+    $l = ev_mqtt_praefixe();
+    if (in_array($w, $l, true)) { return; }
+    $l[] = $w;
+    ev_datei_schreiben($f, (string) json_encode($l), 0644);
+}
+
+/**
+ * Das Lebenszeichen: nie retained (Regeln/07, Abschnitt 3). Seit 0.9.34 bei
+ * einer Aenderung sofort, sonst hoechstens alle EV_LEBEN_ABSTAND Sekunden
+ * (M5); bis 0.9.33 ging es in JEDEM Lauf. Alles andere nur bei Aenderung und
+ * im Vollversand (ev_mqtt_publish()).
  */
 function ev_mqtt_lebenszeichen_liste()
 {
     return array('ok', 'ts', 'dienst', 'betriebsbereit');
 }
+
+/** Hoechstens so oft (Sekunden) geht ein unveraendertes Lebenszeichen hinaus (M5). */
+define('EV_LEBEN_ABSTAND', 30);
 
 /**
  * Felder, die NICHT ueber MQTT gehen. alter_s: ueber MQTT gibt es kein Alter,
@@ -2492,79 +2895,75 @@ function ev_mqtt_fassung()
 
 function ev_mqtt_publish($werte = null, $voll = false)
 {
+    $GLOBALS['ev_mqtt_grund'] = '';
     $cfg = ev_config();
     if (empty($cfg['mqtt_ein'])) {
         // Wird MQTT wieder eingeschaltet, beginnt es mit einem Vollversand.
         @unlink(ev_mqtt_gesendet_datei());
+        $GLOBALS['ev_mqtt_grund'] = 'aus';
         return 0;
     }
     $z = ev_mqtt_zustand();
     if (!$z['udpport']) {
         ev_log_wenn_neu('mqtt', 'kein UDP-Eingangsport in der general.json - Gateway eingerichtet?');
+        $GLOBALS['ev_mqtt_grund'] = 'kein_port';
         return 0;
     }
     if ($werte === null) { $werte = ev_werte(); }
     /* Hat EVCC in diesem Lauf geantwortet? Nur dann gehen die Themen der
-     * Retain-Tabelle retained hinaus (siehe ev_retain_liste()). Bis 0.9.32
-     * gingen bei einem gescheiterten Abruf die Platzhalter retained ueber den
-     * zuletzt gemeldeten Stand - ohne Zwischenspeicher wurde aus dem Lademodus
-     * 3 im Broker eine 0 (in WSL gemessen, Pruefung-EVCC-0.9.33, Faelle R10,
-     * R11) -, und fehler_nr 1 (keine Antwort) blieb nach dem Ende des Dienstes
-     * fuer immer stehen (R8, R9). */
+     * Retain-Tabelle retained hinaus (siehe ev_retain_liste()). */
     $ev_antwort = isset($werte['ok']['wert']) && (int) $werte['ok']['wert'] === 1;
+    /* Keine Antwort UND kein alter Stand (Neustart des LoxBerry, EVCC noch
+     * nicht da): dann gehen nur das Lebenszeichen und die Fehlerfelder
+     * hinaus (M2, seit 0.9.34). Bis 0.9.33 kamen 41 Themen der Retain-Tabelle
+     * als 'publish ... 0' beim Gateway an - "Lademodus aus, Ladegrenze 0" in
+     * Loxone nach jedem Neustart (Pruefbericht mqtt, B2). */
+    $ev_ohne_stand = !$ev_antwort && (!isset($werte['ts']['wert']) || (int) $werte['ts']['wert'] === 0);
+    $ev_nur = array_flip(array('ok', 'ts', 'dienst', 'betriebsbereit', 'fehler_nr', 'letzter_fehler'));
     $ev_praefix = ev_mqtt_thema($cfg['mqtt_topic']);
+    ev_mqtt_praefix_merken($ev_praefix);
+    $ev_felder = ev_felder();
     /* Die Altwerte, die der Broker noch haelt (oder alle, wenn er nicht zu
      * fragen war), bekommen eine leere retain-Nutzlast UNMITTELBAR vor ihrem
-     * gueltigen Wert - im selben Versand, als Nachbarzeile. Jedes Altthema hat
-     * in diesem Versand einen Wert (ev_mqtt_altlast_liste() nimmt nur die
-     * Themen dieses Laufs); eine leere Nachricht ohne Wert dahinter entsteht
-     * also nicht. */
+     * gueltigen Wert - im selben Versand, als Nachbarzeile. */
     $ev_weg = array_flip(ev_mqtt_altlast($ev_praefix, $werte)['themen']);
-    /* NUR AENDERUNGEN, das Lebenszeichen in jedem Lauf, alles im groben Takt
-     * (seit 0.9.33; Regeln/07, Abschnitt 2: "Wer regelmaessig viele Werte
-     * veroeffentlicht, sendet nur Aenderungen und den vollen Satz in grobem
-     * Takt").
+    /* NUR AENDERUNGEN, alles im groben Takt (seit 0.9.33; Regeln/07,
+     * Abschnitt 2). Vollversand: ohne Sendeliste, nach einem Pluginstart,
+     * nach einem Praefixwechsel, auf Wunsch ($voll, Knopf im Reiter Test) und
+     * alle mqtt_vollsend_min Minuten.
      *
-     * Bis 0.9.32 gingen in jedem Lauf alle Themen hinaus - bei Takt 15 s und
-     * zwei Ladepunkten rund 109 Datagramme je Lauf. Am Geraet stammten davon
-     * 82 % des gesamten Verkehrs am UDP-Eingang des Gateways (Regeln/07,
-     * Gateway-Protokoll 07.09.2026: 600 Datagramme in 83 s), und dieser Eingang verwirft
-     * unter Last Datagramme - auch die der anderen Plugins. In WSL gemessen
-     * (Pruefung-EVCC-0.9.33, Faelle N1-N3): unveraendert 4 statt 109.
+     * Das Lebenszeichen (M5, seit 0.9.34): bei einer Aenderung sofort, sonst
+     * hoechstens alle 30 s (Regeln/07, Einspeisebremse 0.9.20). ts geht mit,
+     * sobald ein anderes Lebenszeichen geht, sonst ebenfalls alle 30 s. Bis
+     * 0.9.33 ging es in jedem Lauf - bei Takt 5 s 48 Datagramme je Minute nur
+     * dafuer (Pruefbericht mqtt, B5).
      *
-     * Vollversand: ohne Sendeliste (erster Lauf, Neustart des LoxBerry, MQTT
-     * wieder eingeschaltet), nach einem Pluginstart (andere Fassung), nach
-     * einem Praefixwechsel, auf Wunsch ($voll, Knopf im Reiter Test) und
-     * alle mqtt_vollsend_min Minuten (0 = nie im Takt) - damit ein
-     * Miniserver, der ohne den LoxBerry neu startet, nach spaetestens dieser
-     * Zeit wieder alle fluechtigen Werte hat. Eine Aenderung von Wert ODER
-     * Verb (retain/publish) zaehlt; ein Altthema geht immer hinaus, damit die
-     * leere Nutzlast ihren gueltigen Wert dahinter hat.
+     * Ein Zustand ohne Aussage (M1, seit 0.9.34) - der Abruf gelang, lieferte
+     * das Feld aber nicht (Ladepunkt fehlt, Startfehler ohne Ladepunkte) -
+     * geht EINMAL als '-' retained hinaus, nie als erfundene 0; auch ein
+     * Vollversand wiederholt ihn nicht. Die Rangzahlen der Preisvorschau
+     * gehen ohne Aussage als '-' fluechtig. Ohne Antwort geht ein Feld ohne
+     * Aussage gar nicht hinaus.
      *
-     * Grenze: der UDP-Eingang bestaetigt nichts. Geht eine Aenderung dort
-     * verloren, steht sie bis zur naechsten Aenderung oder zum naechsten
-     * Vollversand nicht in Loxone (Regeln/07, "Ein Absender merkt nichts
-     * davon"). */
+     * Grenze: der UDP-Eingang bestaetigt nichts. */
     $ev_liste = @json_decode((string) @file_get_contents(ev_mqtt_gesendet_datei()), true);
     $ev_kennung = $ev_praefix . '|' . ev_mqtt_fassung();
     $ev_takt = (int) $cfg['mqtt_vollsend_min'];
-    if (!is_array($ev_liste) || !isset($ev_liste['kennung'], $ev_liste['voll'], $ev_liste['werte'])
-        || !is_array($ev_liste['werte']) || (string) $ev_liste['kennung'] !== $ev_kennung
-        || ($ev_takt > 0 && (time() - (int) $ev_liste['voll']) >= $ev_takt * 60)) {
+    $ev_gleich = is_array($ev_liste) && isset($ev_liste['kennung'], $ev_liste['voll'], $ev_liste['werte'])
+        && is_array($ev_liste['werte']) && (string) $ev_liste['kennung'] === $ev_kennung;
+    if (!$ev_gleich || ($ev_takt > 0 && (time() - (int) $ev_liste['voll']) >= $ev_takt * 60)) {
         $voll = true;
     }
-    $ev_alt = $voll ? array() : $ev_liste['werte'];
+    $ev_bisher = $ev_gleich ? $ev_liste['werte'] : array();
+    $ev_leben_bisher = ($ev_gleich && isset($ev_liste['leben']) && is_array($ev_liste['leben']))
+        ? $ev_liste['leben'] : array();
+    $ev_alt = $voll ? array() : $ev_bisher;
     $ev_neu = $ev_alt;
+    $ev_leben_neu = $ev_leben_bisher;
     $ev_leben = array_flip(ev_mqtt_lebenszeichen_liste());
     $ev_nicht = array_flip(ev_mqtt_nicht_senden());
-    /* Datenstrom statt socket_create.
-     *
-     * socket_* steckt in der Erweiterung php-sockets, die nicht garantiert
-     * geladen ist - und sie stand nicht in dpkg/apt. Fehlt sie, ist das kein
-     * abfangbarer Fehler, sondern ein fataler: 'Call to undefined function'.
-     * Der Cron schreibt nach /dev/null, also haette man es nie gesehen.
-     * stream_socket_client() ist Kernbestandteil von PHP. So haelt es auch
-     * Govee, mit derselben Begruendung wortwoertlich in seiner dpkg/apt. */
+    /* Datenstrom statt socket_create: socket_* steckt in php-sockets, das
+     * nicht garantiert geladen ist; stream_socket_client() ist Kern. */
     $fehl = 0;
     $grund = '';
     $sock = @stream_socket_client('udp://127.0.0.1:' . (int) $z['udpport'],
@@ -2572,21 +2971,54 @@ function ev_mqtt_publish($werte = null, $voll = false)
     if (!$sock) {
         ev_log_wenn_neu('mqtt', 'UDP-Verbindung zum Gateway auf Port '
             . (int) $z['udpport'] . ' nicht moeglich: ' . $grund . ' (' . $fehl . ')');
+        $GLOBALS['ev_mqtt_grund'] = 'udp';
         return 0;
     }
     $n = 0;
-    $behalten = 0;
     $versucht = 0;
+    $gesendet = 0;          // Datagramme dieses Stosses, fuer die 5-ms-Pause (M5)
+    $ev_jetzt = time();
+    $ev_leben_geht = false;
+    $senden = function ($zeile) use ($sock, &$gesendet) {
+        if ($gesendet > 0) { usleep(5000); }
+        $gesendet++;
+        return @fwrite($sock, $zeile) !== false;
+    };
     foreach ($werte as $name => $d) {
         if (isset($ev_nicht[$name])) { continue; }
-        /* Erst die Nutzlast, dann das Verb: eine leere Nutzlast LOESCHT ein
-         * zurueckbehaltenes Thema, sie darf deshalb nie mit retain hinaus. */
-        $nutz = ev_mqtt_nutzlast($d['wert']);
-        $verb = ($ev_antwort && ev_retain_fuer($name, $nutz)) ? 'retain' : 'publish';
+        if ($ev_ohne_stand && !isset($ev_nur[$name])) { continue; }
+        $ev_ohne = !empty($d['ohne']);
+        $ev_retain = ev_retain_fuer($name);
+        if ($ev_ohne && !$ev_antwort) { continue; }
+        if ($ev_ohne && $ev_retain) {
+            $nutz = '-';
+            $verb = 'retain';
+        } elseif ($ev_ohne && isset($ev_felder[$name]) && ev_ohne_minus1($name, $ev_felder[$name])) {
+            $nutz = '-';
+            $verb = 'publish';
+        } else {
+            /* Erst die Nutzlast, dann das Verb: eine leere Nutzlast LOESCHT
+             * ein zurueckbehaltenes Thema, sie darf nie mit retain hinaus. */
+            $nutz = ev_mqtt_nutzlast($d['wert']);
+            $verb = ($ev_antwort && ev_retain_fuer($name, $nutz)) ? 'retain' : 'publish';
+        }
         $thema = ev_mqtt_thema($cfg['mqtt_topic'] . '/' . $name);
         $ev_zeile = $verb . ' ' . $nutz;
-        if (!$voll && !isset($ev_leben[$name]) && !isset($ev_weg[$name])
-            && isset($ev_alt[$name]) && (string) $ev_alt[$name] === $ev_zeile) {
+        if (isset($ev_leben[$name])) {
+            $lb = isset($ev_leben_bisher[$name]) && is_array($ev_leben_bisher[$name])
+                ? $ev_leben_bisher[$name] : null;
+            $faellig = $voll || $lb === null
+                || ($ev_jetzt - (int) $lb['t']) >= EV_LEBEN_ABSTAND
+                || ($name !== 'ts' && (string) $lb['z'] !== $ev_zeile)
+                || ($name === 'ts' && $ev_leben_geht && (string) $lb['z'] !== $ev_zeile);
+            if (!$faellig) { continue; }
+        } elseif ($ev_zeile === 'retain -' && isset($ev_bisher[$name])
+                  && (string) $ev_bisher[$name] === 'retain -') {
+            // '-' steht schon im Broker - einmal genuegt, auch im Vollversand.
+            $ev_neu[$name] = 'retain -';
+            continue;
+        } elseif (!$voll && !isset($ev_weg[$name])
+                  && isset($ev_alt[$name]) && (string) $ev_alt[$name] === $ev_zeile) {
             continue;
         }
         $versucht++;
@@ -2594,28 +3026,30 @@ function ev_mqtt_publish($werte = null, $voll = false)
             /* Ein Leerzeichen hinter dem Thema, sonst keine Nutzlast: die
              * Form, die das Gateway als Loeschung liest (Regeln/07, Nachtrag
              * 19.09.2026: mqttgateway.pl:281, :311-315, :357). */
-            @fwrite($sock, 'retain ' . $thema . ' ');
+            $senden('retain ' . $thema . ' ');
         }
-        $msg = $verb . ' ' . $thema . ' ' . $nutz;
-        if (@fwrite($sock, $msg) !== false) {
+        if ($senden($verb . ' ' . $thema . ' ' . $nutz)) {
             $n++;
-            if ($verb === 'retain') { $behalten++; }
-            // Das Lebenszeichen geht ohnehin jedes Mal; es steht nicht in der Liste.
-            if (!isset($ev_leben[$name])) { $ev_neu[$name] = $ev_zeile; }
+            if (isset($ev_leben[$name])) {
+                $ev_leben_neu[$name] = array('z' => $ev_zeile, 't' => $ev_jetzt);
+                if ($name !== 'ts') { $ev_leben_geht = true; }
+            } else {
+                $ev_neu[$name] = $ev_zeile;
+            }
         }
     }
     fclose($sock);
     if ($n < $versucht) {
         ev_log_wenn_neu('mqtt_teil', sprintf('nur %d von %d Themen gesendet', $n, $versucht));
     }
-    if ($voll || $ev_neu !== $ev_alt) {
-        $ev_datei = ev_mqtt_gesendet_datei();
+    if ($voll || $ev_neu !== $ev_alt || $ev_leben_neu !== $ev_leben_bisher) {
         $ev_js = json_encode(array(
             'kennung' => $ev_kennung,
             'voll' => $voll ? time() : (int) $ev_liste['voll'],
-            'werte' => $ev_neu));
-        if ($ev_js !== false && @file_put_contents($ev_datei . '.neu', $ev_js) !== false) {
-            if (!@rename($ev_datei . '.neu', $ev_datei)) { @unlink($ev_datei . '.neu'); }
+            'werte' => $ev_neu,
+            'leben' => $ev_leben_neu));
+        if ($ev_js !== false) {
+            ev_datei_schreiben(ev_mqtt_gesendet_datei(), $ev_js, 0664);
         }
     }
     return $n;
@@ -2677,7 +3111,12 @@ function ev_zeile($werte = null)
     // noch den Anfang. Ueber MQTT und aktion=json sind sie da.
     foreach (ev_felder_zeile() as $name => $d) {
         if (!isset($werte[$name])) { continue; }
-        $teile[] = strtoupper($name) . '=' . $werte[$name]['wert'];
+        $w = $werte[$name]['wert'];
+        /* Keine erfundene 0 fuer einen Zustand ohne Aussage (C5, M1, seit
+         * 0.9.34): liefert der Abruf das Feld nicht, steht -1 da, wo die Zahl
+         * -1 sonst nie annimmt (ev_ohne_minus1()). */
+        if (!empty($werte[$name]['ohne']) && ev_ohne_minus1($name, $d)) { $w = -1; }
+        $teile[] = strtoupper($name) . '=' . $w;
     }
     return 'EVCC;' . implode(';', $teile) . "\n";
 }
@@ -2730,7 +3169,8 @@ function ev_xml_virtual_in_http($kopf, $cmds)
         $o .= 'MaxVal="' . (int) $c['max'] . '" ';
         $o .= 'Unit="' . ev_x(isset($c['unit']) && $c['unit'] !== ''
                              ? '<v.1> ' . $c['unit'] : '<v.1>') . '" ';
-        $o .= 'HintText=""';
+        // Der Vorbehalt "ungemessen" steht seit 0.9.34 hier statt im Kachelnamen (O9).
+        $o .= 'HintText="' . ev_x(isset($c['hint']) ? $c['hint'] : '') . '"';
         $o .= '/>' . $crlf;
     }
     $o .= '</VirtualInHttp>' . $crlf;
@@ -2773,7 +3213,7 @@ function ev_xml_virtual_out($kopf, $cmds)
         $o .= 'Analog="' . (!empty($c['analog']) ? 'true' : 'false') . '" ';
         $o .= 'Repeat="0" ';
         $o .= 'RepeatRate="0" ';
-        $o .= 'HintText=""';
+        $o .= 'HintText="' . ev_x(isset($c['hint']) ? $c['hint'] : '') . '"';
         $o .= '/>' . $crlf;
     }
     $o .= '</VirtualOut>' . $crlf;
@@ -2850,36 +3290,32 @@ function ev_vorlage_ein()
 {
     $cmds = array();
     foreach (ev_felder_zeile() as $name => $d) {
-        $text = ev_t($d['text']);
-        if (isset($d['nr'])) { $text = sprintf($text, (int) $d['nr']); }
-        $text = ev_kachelname(strip_tags(html_entity_decode($text, ENT_QUOTES, 'UTF-8')));
-        if ($d['einheit'] !== '') { $text .= ' [' . $d['einheit'] . ']'; }
-        /* Der Vorbehalt ohne Fassungsnummer: "neu in 0.9.11" las sich in
-         * Loxone Config wie eine Fassungsnotiz und war fuenfzehn Nummern
-         * spaeter schlicht falsch. Derselbe Wortlaut wie an der
-         * Ausgangsvorlage - ein Vorbehalt, eine Formulierung. */
-        if ($d['quelle'] === 'doku') { $text .= ' (ungemessen)'; }
+        /* Kachelname hoechstens 40 Zeichen aus dem Kurzschluessel (O9); die
+         * Einheit steht in Unit, der Vorbehalt fuer Felder aus der
+         * Dokumentation im HintText - aus der Sprachdatei (O7). Bis 0.9.33
+         * hingen beide am Kommentar, und "(ungemessen)" stand fest auf
+         * Deutsch auch in der englischen Vorlage. */
+        $text = ev_kurztext($d['text'], isset($d['nr']) ? $d['nr'] : null);
+        /* Kann das Feld ohne Aussage -1 tragen (C5, M1)? Dann muss der
+         * Eingang es auch annehmen - sonst kappte Loxone auf MinVal. */
+        $min = ev_ohne_minus1($name, $d) ? min(-1, (int) $d['min']) : $d['min'];
         $cmds[] = array(
             // Das Semikolon gehoert ins Suchmuster. Jedes Feld steht in der
             // Zeile hinter einem ';' - ohne es traefe ein kuenftiger Feldname,
-            // der auf einen bestehenden endet, die falsche Stelle. Gemessen
-            // kollidiert heute nichts (84 von 84 eindeutig); das hier ist
-            // Vorsorge fuer das 85. Feld, und drei Linien im Bestand halten
-            // es schon so.
+            // der auf einen bestehenden endet, die falsche Stelle.
             'title' => 'EVCC_' . strtoupper($name),
             'comment' => $text,
             'check' => '\i;' . strtoupper($name) . '=\i\v',
-            'analog' => $d['analog'], 'min' => $d['min'], 'max' => $d['max'],
+            'analog' => $d['analog'], 'min' => $min, 'max' => $d['max'],
             'unit' => $d['einheit'],
+            'hint' => ($d['quelle'] === 'doku') ? ev_t('VORLAGE.HINT_UNGEMESSEN') : '',
         );
     }
     return array('VI_evcc.xml', ev_xml_virtual_in_http(array(
         'title'   => 'EVCC',
         'address' => ev_endpunkt('status'),
         'polling' => '30',
-        'comment' => 'Erzeugt vom LoxBerry-Plugin EVCC (' . date('d.m.Y') . '). '
-                   . 'Loxone Config legt beim Import neu an und ueberschreibt nichts - '
-                   . 'zweimal eingelesen ergibt doppelte Bausteine.',
+        'comment' => sprintf(ev_t('VORLAGE.KOMMENTAR_EIN'), date('d.m.Y')),
     ), $cmds));
 }
 
@@ -2902,31 +3338,15 @@ function ev_vorlage_aus()
 
     $cmds = array();
     $bauen = function ($aktion, $b, $lp) use (&$cmds, $frage) {
-        /* Der Titel darf kein '=' tragen - bis 0.9.10 hiess der Ausgang
-         * "EVCC_MODUS_LP=1", weil nur das '&' ersetzt wurde.
-         *
-         * Und er traegt seit 0.9.27 den Vorsatz SET_. In der Bausteinsuche
-         * von Loxone Config fehlt der Geraeteknoten; Eingang und Ausgang
-         * stehen dort nebeneinander. Gemessen an 0.9.26: von 141 Titeln
-         * beider Vorlagen waren 140 verschieden - das Feld
-         * 'entladeregelung' und der gleichnamige Befehl ergaben zweimal
-         * EVCC_ENTLADEREGELUNG. Der Vorsatz loest die Klasse statt des
-         * Einzelfalls und fasst dabei NUR die Titel der Ausgangsvorlage an:
-         * Feldnamen, Statuszeile, MQTT-Themen und jede Befehlserkennung
-         * bleiben unveraendert. Vorbild FB_SET_ in Beschattung_Fensterbilanz
-         * 0.12.6. */
-        $titel = 'EVCC_SET_' . strtoupper($aktion) . ($lp ? '_LP' . $lp : '');
-        $text = ev_kachelname(strip_tags(html_entity_decode(ev_t($b['text']), ENT_QUOTES, 'UTF-8')));
-        if ($b['quelle'] === 'doku') {
-            // Ein Befehl, den niemand gemessen hat, wird als solcher
-            // gekennzeichnet - auch in Loxone Config. Wortgleich mit der
-            // Eingangsvorlage und ohne Fassungsnummer: der Vorbehalt
-            // veraltet nicht, eine Nummer schon.
-            $text .= ' (ungemessen)';
-        }
+        /* Der Titel traegt seit 0.9.27 den Vorsatz SET_ - aus
+         * ev_befehl_titel(), derselben Stelle, aus der die Baustein-Liste im
+         * Reiter Einbindung in Loxone ihn nimmt (O8, seit 0.9.34). */
+        $titel = ev_befehl_titel($aktion, $lp);
+        $c = array('title' => $titel, 'comment' => ev_kurztext($b['text']),
+                   'analog' => !empty($b['analog']), 'method' => 'GET',
+                   // Ein Befehl, den niemand gemessen hat, sagt das - im HintText (O9).
+                   'hint' => ($b['quelle'] === 'doku') ? ev_t('VORLAGE.HINT_UNGEMESSEN') : '');
         $adr = $frage . $aktion . ($lp ? '&lp=' . $lp : '');
-        $c = array('title' => $titel, 'comment' => $text,
-                   'analog' => !empty($b['analog']), 'method' => 'GET');
         if ($b['pruef'] === 'ohne') {
             // DELETE-Befehle brauchen keinen Wert: ein Digitalausgang, der
             // beim Einschalten ausloest.
@@ -2935,10 +3355,11 @@ function ev_vorlage_aus()
         } elseif ($b['pruef'] === 'schalter') {
             $c['on'] = $adr . '&wert=1';
             $c['off'] = $adr . '&wert=0';
-        } elseif ($b['pruef'] === 'plan') {
-            // Zwei Werte: Ziel-Ladestand und Vorlauf in Stunden. Loxone
-            // schickt beide als Analogwerte desselben Befehls.
-            $c['on'] = $adr . '&wert=<v.0>&stunden=<v.1>';
+        } elseif ($b['pruef'] === 'planziel' || $b['pruef'] === 'planstunden') {
+            /* Ladeplan aus zwei Ausgaengen, jeder mit <v> (C11, seit 0.9.34):
+             * <v.N> ist in Loxone derselbe Wert mit N Nachkommastellen, zwei
+             * Werte lassen sich aus einem Ausgang nicht bilden. */
+            $c['on'] = $adr . '&wert=<v>';
             $c['off'] = '';
         } else {
             $c['on'] = $adr . '&wert=<v.0>';
@@ -2948,22 +3369,113 @@ function ev_vorlage_aus()
     };
 
     foreach (ev_befehle() as $aktion => $b) {
-        if ($b['ebene'] !== 'lp') { continue; }
+        if ($b['ebene'] !== 'lp' || (isset($b['vorlage']) && empty($b['vorlage']))) { continue; }
         for ($i = 1; $i <= (int) $cfg['ladepunkte']; $i++) { $bauen($aktion, $b, $i); }
     }
     foreach (ev_befehle() as $aktion => $b) {
-        if ($b['ebene'] !== 'anlage') { continue; }
+        if ($b['ebene'] !== 'anlage' || (isset($b['vorlage']) && empty($b['vorlage']))) { continue; }
         $bauen($aktion, $b, 0);
     }
 
     return array('VQ_evcc.xml', ev_xml_virtual_out(array(
-        'title'   => 'EVCC Befehle',
+        'title'   => ev_t('VORLAGE.TITEL_AUS'),
         'address' => $adresse,
-        'comment' => 'Schreibende Befehle müssen im Reiter Einstellungen freigegeben sein. '
-                   . 'Loxone Config legt beim Import neu an und ueberschreibt nichts - '
-                   . 'zweimal eingelesen ergibt doppelte Bausteine. '
-                   . 'Erzeugt vom LoxBerry-Plugin EVCC (' . date('d.m.Y') . ').',
+        'comment' => sprintf(ev_t('VORLAGE.KOMMENTAR_AUS'), date('d.m.Y')),
     ), $cmds));
+}
+
+/* ==================================================================
+ * Oberflaeche: Einmalmeldung, Zwischenspeicher, Gateway-Texte (seit 0.9.34)
+ * ================================================================== */
+
+/**
+ * Einmalmeldung nach dem POST (O1). Regeln/04: data/plugins/<ordner>/
+ * einmalmeldung.json, 0600, 120 s gueltig, nur beim GET gelesen und dabei
+ * geloescht. Das Aktionstoken und das Formularmerkmal stehen darin nur als
+ * *** (Regeln/04, Nachtrag Raumklima 17.09.2026). Bauform ap_meldung_ablegen()
+ * (APC-UPS NG 1.2.14).
+ */
+function ev_meldung_datei()
+{
+    return ev_paths()['datadir'] . '/einmalmeldung.json';
+}
+
+function ev_meldung_ablegen($daten)
+{
+    $daten['zeit'] = time();
+    $geheim = array();
+    $c = ev_config(false);
+    if ((string) $c['aktionstoken'] !== '') { $geheim[] = (string) $c['aktionstoken']; }
+    if ((string) $c['passwort'] !== '') { $geheim[] = (string) $c['passwort']; }
+    if (ev_formtoken() !== '') { $geheim[] = ev_formtoken(); }
+    array_walk_recursive($daten, function (&$w) use ($geheim) {
+        if (is_string($w)) {
+            foreach ($geheim as $g) { $w = str_replace($g, '***', $w); }
+        }
+    });
+    $js = json_encode($daten, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    return $js !== false && ev_datei_schreiben(ev_meldung_datei(), $js, 0600);
+}
+
+function ev_meldung_abholen()
+{
+    $f = ev_meldung_datei();
+    clearstatcache(true, $f);
+    if (!is_file($f)) { return null; }
+    $d = json_decode((string) @file_get_contents($f), true);
+    @unlink($f);                        // loeschen VOR der Anzeige
+    if (!is_array($d) || !isset($d['zeit']) || abs(time() - (int) $d['zeit']) > 120) { return null; }
+    $liste = function ($s) use ($d) {
+        return (isset($d[$s]) && is_array($d[$s])) ? array_values(array_filter($d[$s], 'is_string')) : array();
+    };
+    return array('meldungen' => $liste('meldungen'), 'fehler' => $liste('fehler'));
+}
+
+/**
+ * Der Zustand aus dem Zwischenspeicher des Abrufdienstes - ohne jede eigene
+ * Anfrage an EVCC (O4). Ohne Zwischenspeicher: ein leerer Stand (stand 0).
+ */
+function ev_state_gespeichert()
+{
+    $f = ev_tmpdir() . '/state.json';
+    $c = is_file($f) ? json_decode((string) @file_get_contents($f), true) : null;
+    if (is_array($c) && isset($c['ok'])) { return $c; }
+    return array('ok' => 0, 'stand' => 0, 'fehler' => '', 'fehlernr' => 0, 'roh' => array());
+}
+
+/**
+ * Der Sprachschluessel passend zur Fassung des MQTT-Gateways (M6):
+ * <basis>_V1, <basis>_V2 oder, wenn die Fassung nicht feststellbar ist, die
+ * Basis selbst - dort sind beide Faelle beschrieben. Unter V2 gibt das
+ * Gateway zurueckbehaltene Nachrichten beim Neuverbinden NICHT an den
+ * Miniserver weiter und unterdrueckt gleiche Werte; der Text darf dort nichts
+ * zusagen, was V2 nicht einloest (Pruefbericht mqtt, B6).
+ */
+function ev_gateway_schluessel($basis)
+{
+    $m = ev_mqtt_zustand();
+    $f = isset($m['fassung']) ? (int) $m['fassung'] : 0;
+    if ($f >= 2) { return $basis . '_V2'; }
+    if ($f === 1) { return $basis . '_V1'; }
+    return $basis;
+}
+
+/**
+ * Ein Kachelname fuer die Vorlagen, hoechstens 40 Zeichen (O9, seit 0.9.34).
+ * Zuerst der Kurzschluessel KURZ.<name> (bei Befehlen KURZ.AUS_<name>), sonst
+ * der Text bis zur ersten Klammer. Die Einheit steht im Attribut Unit, der
+ * Vorbehalt "ungemessen" im HintText - beides hing bis 0.9.33 am Kommentar,
+ * und 34 von 70 Eingangs- und 7 von 21 Ausgangskommentaren waren laenger als
+ * 40 Zeichen, der laengste 75 (Pruefbericht oberflaeche, Befund 14).
+ */
+function ev_kurztext($schluessel, $nr = null)
+{
+    list($a, $s) = array_pad(explode('.', (string) $schluessel, 2), 2, '');
+    $k = 'KURZ.' . ($a === 'AUS' ? 'AUS_' : '') . $s;
+    $t = ev_t($k);
+    if ($t === $k) { $t = ev_kachelname(strip_tags(html_entity_decode(ev_t($schluessel), ENT_QUOTES, 'UTF-8'))); }
+    if ($nr !== null) { $t = sprintf($t, (int) $nr); }
+    return $t;
 }
 
 /* ==================================================================
@@ -3132,9 +3644,23 @@ function ev_befehle()
          * NICHT gemessen. Antwortet EVCC mit 404, sagt der Endpunkt genau
          * das - samt dem Hinweis, dass dieser Befehl aus der Dokumentation
          * stammt. Er biegt nichts zurecht und behauptet keinen Erfolg. */
+        /* 'plansoc' traegt zwei Werte in EINER Adresse. In Loxone ist <v.N>
+         * aber derselbe Analogwert mit N Nachkommastellen - aus einem Ausgang
+         * lassen sich Ziel und Stunden nicht getrennt bilden (Pruefbericht
+         * oberflaeche, Befund 13). Der Befehl bleibt fuer eigene Aufrufe
+         * bestehen (Namen behalten ihre Bedeutung), geht aber seit 0.9.34
+         * nicht mehr in die Vorlage ('vorlage' => 0). Dort stehen die zwei
+         * getrennten Befehle darunter, jeder mit <v> (C11). */
         'plansoc' => array('ebene' => 'lp', 'methode' => 'POST',
             'pfad' => '/api/loadpoints/%LP%/plan/soc/%WERT%/%ZEIT%', 'pruef' => 'plan',
-            'min' => 0, 'max' => 100, 'text' => 'AUS.PLANSOC', 'quelle' => 'doku', 'analog' => 1),
+            'min' => 0, 'max' => 100, 'text' => 'AUS.PLANSOC', 'quelle' => 'doku', 'analog' => 1,
+            'vorlage' => 0),
+        'plansoc_ziel' => array('ebene' => 'lp', 'methode' => 'POST',
+            'pfad' => '/api/loadpoints/%LP%/plan/soc/%WERT%/%ZEIT%', 'pruef' => 'planziel',
+            'min' => 0, 'max' => 100, 'text' => 'AUS.PLANSOC_ZIEL', 'quelle' => 'doku', 'analog' => 1),
+        'plansoc_stunden' => array('ebene' => 'lp', 'methode' => 'POST',
+            'pfad' => '/api/loadpoints/%LP%/plan/soc/%WERT%/%ZEIT%', 'pruef' => 'planstunden',
+            'min' => 0.25, 'max' => 168, 'text' => 'AUS.PLANSOC_STUNDEN', 'quelle' => 'doku', 'analog' => 1),
         'planaus' => array('ebene' => 'lp', 'methode' => 'DELETE',
             'pfad' => '/api/loadpoints/%LP%/plan', 'pruef' => 'ohne',
             'text' => 'AUS.PLANAUS', 'quelle' => 'doku', 'analog' => 0),
@@ -3167,6 +3693,17 @@ function ev_befehle()
  * '3.000000' - deshalb wird bei ganzzahligen Feldern gerundet, BEVOR geprueft
  * wird.
  */
+/**
+ * Der Titel eines virtuellen Ausgangs in der Vorlage - EINE Stelle fuer die
+ * Vorlage und die Baustein-Liste im Reiter Einbindung in Loxone (O8, seit
+ * 0.9.34). Bis 0.9.33 nannte die Liste EVCC_MODUS_LP1, die Vorlage aber seit
+ * 0.9.27 EVCC_SET_MODUS_LP1 (Pruefbericht oberflaeche, Befund 12).
+ */
+function ev_befehl_titel($aktion, $lp = 0)
+{
+    return 'EVCC_SET_' . strtoupper((string) $aktion) . ($lp ? '_LP' . (int) $lp : '');
+}
+
 function ev_befehl_pruefen($b, $wert)
 {
     $zahl = str_replace(',', '.', (string) $wert);
@@ -3207,7 +3744,16 @@ function ev_befehl_pruefen($b, $wert)
         if (!in_array($ganz, array(0, 1), true)) { return array(0, 'BEREICH;ERLAUBT=0,1'); }
         return array(1, (string) $b['schalter'][$ganz]);
     }
-    if ($art === 'ganz' || $art === 'plan') {
+    if ($art === 'planstunden') {
+        // Vorlauf in Stunden, mit Nachkommastellen (C11).
+        if (!is_numeric($zahl)) { return array(0, 'KEINE_ZAHL'); }
+        $z = (float) $zahl;
+        if ($z < (float) $b['min'] || $z > (float) $b['max']) {
+            return array(0, 'BEREICH;ERLAUBT=' . $b['min'] . '..' . $b['max']);
+        }
+        return array(1, (string) $z);
+    }
+    if ($art === 'ganz' || $art === 'plan' || $art === 'planziel') {
         if ($ganz === null || $ganz < $b['min'] || $ganz > $b['max']) {
             return array(0, 'BEREICH;ERLAUBT=' . $b['min'] . '..' . $b['max']);
         }
@@ -3254,7 +3800,9 @@ function ev_befehl_pruefen($b, $wert)
  * und er tat es nicht; das soll nicht wieder passieren.
  * ================================================================== */
 
-/** Wie alt duerfen die Zusatzwerte werden, bevor sie neu geholt werden. */
+/** Wie alt duerfen die Zusatzwerte werden, bevor sie neu geholt werden.
+ *  Die Preisvorschau ueberlebt einen gescheiterten Abruf, solange ihre
+ *  Raten die laufende Stunde abdecken (C1, seit 0.9.34). */
 define('EV_ZUSATZ_ALTER', 300);
 
 function ev_zusatz_holen($erzwingen = false)
@@ -3264,6 +3812,7 @@ function ev_zusatz_holen($erzwingen = false)
     if (!is_array($st)) { return 0; }
     $alt = isset($st['roh']['lox']['stand']) ? (int) $st['roh']['lox']['stand'] : 0;
     if (!$erzwingen && (time() - $alt) < EV_ZUSATZ_ALTER) { return 0; }
+    $ev_alt_lox = (isset($st['roh']['lox']) && is_array($st['roh']['lox'])) ? $st['roh']['lox'] : array();
 
     $lox = array('stand' => time());
 
@@ -3285,56 +3834,48 @@ function ev_zusatz_holen($erzwingen = false)
         );
     }
 
-    /* ---- Preisvorschau ---- */
+    /* ---- Preisvorschau (C1, seit 0.9.34) ----
+     *
+     * Bis 0.9.33 ersetzte jeder Lauf 'lox' ganz; scheiterte der Tarifabruf,
+     * waren die Preise weg, und ev_werte() machte aus jedem fehlenden Feld
+     * eine 0 - Rang 0 bei OK=1 und FEHLER_NR=0, ohne Protokollzeile
+     * (Pruefbericht code, Befund 1). Jetzt:
+     *   - die Raten werden mit Anfang und Ende gespeichert;
+     *   - scheitert der Abruf oder liefert er nichts, gelten die gespeicherten
+     *     Raten weiter, solange eine davon die laufende Stunde abdeckt - die
+     *     Kennzahlen werden fuer JETZT neu gerechnet;
+     *   - sonst ok = 0: PREIS_OK=0, und Rang, Stundenzahl und beste Stunde
+     *     haben keine Aussage (-1 bzw. '-');
+     *   - der Fehlschlag steht einmal im Protokoll (gebremst). */
+    $raten = null;
+    $grund = '';
     $a = ev_http('/api/tariff/grid', 'GET', null, 6);
     if ($a['ok']) {
-        $j = json_decode($a['body'], true);
-        if (isset($j['result'])) { $j = $j['result']; }
-        $liste = null;
-        foreach (array('rates', 'Rates') as $k) {
-            if (isset($j[$k]) && is_array($j[$k])) { $liste = $j[$k]; break; }
-        }
-        if ($liste === null && is_array($j) && isset($j[0])) { $liste = $j; }
-        $preise = array();
-        $stunden = array();
-        if (is_array($liste)) {
-            foreach ($liste as $r) {
-                if (!is_array($r)) { continue; }
-                $p = null;
-                foreach (array('price', 'value', 'Price') as $k) {
-                    if (isset($r[$k]) && is_numeric($r[$k])) { $p = (float) $r[$k]; break; }
-                }
-                if ($p === null) { continue; }
-                $s = -1;
-                foreach (array('start', 'Start') as $k) {
-                    if (isset($r[$k])) { $s = (int) date('G', strtotime((string) $r[$k])); break; }
-                }
-                $preise[] = $p;
-                $stunden[] = $s;
-            }
-        }
-        if ($preise) {
-            /* Der Rang gilt fuer die LAUFENDE Stunde, nicht fuer den ersten
-             * Eintrag der Liste. Dass EVCC immer ab "jetzt" liefert, ist
-             * nirgends gemessen; wo die Stunde nicht zu finden ist, bleibt
-             * der erste Eintrag der Rueckfall - dann steht es wenigstens an
-             * einer Stelle. */
-            $ev_h = (int) date('G');
-            $ev_i = array_search($ev_h, $stunden, true);
-            $jetzt = ($ev_i !== false && isset($preise[$ev_i])) ? $preise[$ev_i] : $preise[0];
-            // Zaehlen, nicht sortieren: das sort() war fuer diese Schleife
-            // ohne Wirkung und liess die Stelle sortierabhaengig aussehen.
-            $rang = 1;
-            foreach ($preise as $p) { if ($p < $jetzt) { $rang++; } }
-            $besti = array_search(min($preise), $preise, true);
-            $lox['preis'] = array(
-                'min' => min($preise), 'max' => max($preise),
-                'schnitt' => round(array_sum($preise) / count($preise), 4),
-                'rang' => $rang, 'anzahl' => count($preise),
-                'beste_stunde' => isset($stunden[$besti]) ? $stunden[$besti] : -1,
-            );
+        $raten = ev_preis_raten(json_decode($a['body'], true));
+        if (!$raten) { $grund = ev_t('LOG.PREIS_LEER'); }
+    } else {
+        $grund = (string) $a['fehler'];
+    }
+    $jetzt = time();
+    $preis = $raten ? ev_preis_rechnen($raten, $jetzt) : null;
+    if ($preis === null && $raten) { $grund = ev_t('LOG.PREIS_NICHT_JETZT'); }
+    if ($preis !== null) {
+        $preis['raten'] = $raten;
+        ev_log_wenn_neu('preis', 'ok, ' . count($raten) . ' Raten');
+    } else {
+        $alt_raten = (isset($ev_alt_lox['preis']['raten']) && is_array($ev_alt_lox['preis']['raten']))
+            ? $ev_alt_lox['preis']['raten'] : array();
+        $preis = $alt_raten ? ev_preis_rechnen($alt_raten, $jetzt) : null;
+        if ($preis !== null) {
+            $preis['raten'] = $alt_raten;
+            $preis['alt'] = 1;
+            ev_log_wenn_neu('preis', sprintf(ev_t('LOG.PREIS_ALT'), $grund));
+        } else {
+            $preis = array('ok' => 0);
+            ev_log_wenn_neu('preis', sprintf(ev_t('LOG.PREIS_KEINE'), $grund));
         }
     }
+    $lox['preis'] = $preis;
 
     /* ---- Statistik ---- */
     $a = ev_http('/api/statistics', 'GET', null, 6);
@@ -3342,11 +3883,92 @@ function ev_zusatz_holen($erzwingen = false)
         $j = json_decode($a['body'], true);
         if (isset($j['result'])) { $j = $j['result']; }
         if (is_array($j)) { $lox['statistik'] = $j; }
+    } elseif (isset($ev_alt_lox['statistik'])) {
+        // Die Statistik hat keinen Zeitbezug zur laufenden Stunde; bei einem
+        // Fehlschlag bleibt die letzte stehen, wie bei der Oberflaeche.
+        $lox['statistik'] = $ev_alt_lox['statistik'];
     }
 
+    /* Den JUENGSTEN Stand ergaenzen, nicht den von vorhin: zwischen Lesen und
+     * Schreiben kann ein Abruf state.json erneuert haben (C7). */
+    $st2 = json_decode((string) @file_get_contents($cache), true);
+    if (is_array($st2) && isset($st2['roh']) && is_array($st2['roh'])) { $st = $st2; }
     $st['roh']['lox'] = $lox;
-    @file_put_contents($cache, json_encode($st));
+    ev_datei_schreiben($cache, (string) json_encode($st), 0664);
     return 1;
+}
+
+/**
+ * Die Raten aus der Antwort von /api/tariff/grid: Liste von
+ * array(anfang_ts, ende_ts, preis). Fehlt das Ende, gilt der Anfang der
+ * naechsten Rate bzw. eine Stunde. Rueckgabe array() ohne verwertbare Rate.
+ */
+function ev_preis_raten($j)
+{
+    if (is_array($j) && isset($j['result'])) { $j = $j['result']; }
+    $liste = null;
+    foreach (array('rates', 'Rates') as $k) {
+        if (is_array($j) && isset($j[$k]) && is_array($j[$k])) { $liste = $j[$k]; break; }
+    }
+    if ($liste === null && is_array($j) && isset($j[0])) { $liste = $j; }
+    $raten = array();
+    if (!is_array($liste)) { return $raten; }
+    foreach ($liste as $r) {
+        if (!is_array($r)) { continue; }
+        $p = null;
+        foreach (array('price', 'value', 'Price') as $k) {
+            if (isset($r[$k]) && is_numeric($r[$k])) { $p = (float) $r[$k]; break; }
+        }
+        $a = null;
+        foreach (array('start', 'Start') as $k) {
+            if (isset($r[$k])) { $t = strtotime((string) $r[$k]); if ($t !== false) { $a = $t; } break; }
+        }
+        $e = null;
+        foreach (array('end', 'End') as $k) {
+            if (isset($r[$k])) { $t = strtotime((string) $r[$k]); if ($t !== false) { $e = $t; } break; }
+        }
+        if ($p === null || $a === null) { continue; }
+        $raten[] = array($a, $e, $p);
+    }
+    usort($raten, function ($x, $y) { return $x[0] - $y[0]; });
+    $n = count($raten);
+    for ($i = 0; $i < $n; $i++) {
+        if ($raten[$i][1] === null || $raten[$i][1] <= $raten[$i][0]) {
+            $raten[$i][1] = ($i + 1 < $n) ? $raten[$i + 1][0] : $raten[$i][0] + 3600;
+        }
+    }
+    return $raten;
+}
+
+/**
+ * Die Kennzahlen fuer den Zeitpunkt $jetzt: nur Raten, die noch nicht zu
+ * Ende sind; die laufende Rate muss darunter sein, sonst null (keine Aussage).
+ * Der Rang zaehlt, wie viele der kuenftigen Raten billiger sind als die
+ * laufende (1 = die guenstigste).
+ */
+function ev_preis_rechnen($raten, $jetzt)
+{
+    $kommend = array();
+    $laufend = null;
+    foreach ($raten as $r) {
+        if (!is_array($r) || count($r) < 3) { continue; }
+        if ((int) $r[1] <= $jetzt) { continue; }
+        $kommend[] = $r;
+        if ($laufend === null && (int) $r[0] <= $jetzt && $jetzt < (int) $r[1]) { $laufend = $r; }
+    }
+    if ($laufend === null || !$kommend) { return null; }
+    $preise = array();
+    foreach ($kommend as $r) { $preise[] = (float) $r[2]; }
+    $rang = 1;
+    foreach ($preise as $p) { if ($p < (float) $laufend[2]) { $rang++; } }
+    $besti = array_search(min($preise), $preise, true);
+    return array(
+        'ok' => 1,
+        'min' => min($preise), 'max' => max($preise),
+        'schnitt' => round(array_sum($preise) / count($preise), 4),
+        'rang' => $rang, 'anzahl' => count($preise),
+        'beste_stunde' => (int) date('G', (int) $kommend[$besti][0]),
+    );
 }
 
 /** Die Statistik aus dem Zwischenspeicher - ohne eigene Abfrage. */
@@ -3391,7 +4013,7 @@ function ev_endpunkt_kandidaten()
  *
  * Rueckgabe: array(ok, code, erste Zeile, Adresse).
  */
-function ev_selbsttest_endpunkt($aktion = 'status')
+function ev_selbsttest_endpunkt($aktion = 'status', $zeit = 10)
 {
     $url = ev_endpunkt($aktion) . '&selbsttest=1';
     $kopf = array('User-Agent: LoxBerry-EVCC-Plugin-Selbsttest', 'Accept: text/plain');
@@ -3400,8 +4022,8 @@ function ev_selbsttest_endpunkt($aktion = 'status')
     if (function_exists('curl_init')) {
         $ch = curl_init($url);
         curl_setopt_array($ch, array(
-            CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 10,
-            CURLOPT_CONNECTTIMEOUT => 5, CURLOPT_HTTPHEADER => $kopf,
+            CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => $zeit,
+            CURLOPT_CONNECTTIMEOUT => min(5, $zeit), CURLOPT_HTTPHEADER => $kopf,
         ));
         $body = curl_exec($ch);
         $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
@@ -3409,22 +4031,22 @@ function ev_selbsttest_endpunkt($aktion = 'status')
         curl_close($ch);
         if ($body === false) { return array(0, 0, ev_netzfehler($fehler, $url), $url); }
     } else {
+        /* Kopfzeilen ueber den Datenstrom (C8, seit 0.9.34) - ev_http_strom(). */
         $ctx = stream_context_create(array('http' => array(
-            'method' => 'GET', 'timeout' => 10, 'ignore_errors' => true,
+            'method' => 'GET', 'timeout' => $zeit, 'ignore_errors' => true,
+            'follow_location' => 0, 'max_redirects' => 1,
             'header' => implode("\r\n", $kopf))));
-        $body = @file_get_contents($url, false, $ctx);
-        if (isset($http_response_header[0])
-            && preg_match('#\s(\d{3})\s#', $http_response_header[0], $m)) {
-            $code = (int) $m[1];
-        }
+        $ev_dst = ini_get('default_socket_timeout');
+        @ini_set('default_socket_timeout', (string) (int) $zeit);
+        list($body, $code) = ev_http_strom($url, $ctx);
+        if ($ev_dst !== false) { @ini_set('default_socket_timeout', (string) $ev_dst); }
         if ($body === false) { return array(0, $code, ev_t('FEHLER.KEINE_ANTWORT'), $url); }
     }
     $erste = trim(strtok((string) $body, "\n"));
     if ($erste === '' && $code >= 500) {
         // Genau das Bild der Fassung 0.9.10: Code 500, Rumpf leer. Der Grund
         // steht dann nur im Fehlerprotokoll des Webservers, nicht hier.
-        $erste = 'leere Antwort - der Endpunkt ist mit einem fatalen Fehler '
-               . 'abgebrochen (display_errors ist dort aus).';
+        $erste = ev_t('FEHLER.LEER_500');
     }
     return array(($code === 200 && strpos($erste, 'EVCC;') === 0) ? 1 : 0,
                  $code, $erste, $url);
@@ -3473,20 +4095,30 @@ function ev_wert_taugt($v)
  */
 function ev_wert_pruefen($schluessel, $wert)
 {
-    $s = trim((string) $wert);
+    /* NICHT getrimmt (C9, seit 0.9.34): ein Wert mit Leerzeichen am Rand wird
+     * abgewiesen, nicht zurechtgebogen (Regeln/05, Ergaenzung 24.09.2026).
+     * Bis 0.9.33 stand hier trim(), und eine Sicherung mit " http://... "
+     * wurde still berichtigt uebernommen (Pruefbericht code, Befund 9). */
+    if (is_array($wert) || is_object($wert) || is_bool($wert) || is_null($wert)) { return false; }
+    $s = (string) $wert;
     switch ($schluessel) {
         case 'url':
             return $s !== '' && preg_match(
                 '#^https?://[A-Za-z0-9\.\-]+(:[0-9]{1,5})?(/\S*)?$#', $s) === 1;
         case 'passwort':
-            return strlen($s) <= 256;
+            // Leerzeichen im Passwort sind erlaubt, am Rand nicht: dort gehen
+            // sie in der Kopfzeile 'Authorization: Bearer ...' verloren.
+            return strlen($s) <= 256 && $s === trim($s)
+                   && preg_match('/[\x00-\x1F\x7F]/', $s) !== 1;
         case 'aktionstoken':
             // Weit gefasst: alles, was ohne Kodierung in eine Adresse passt.
             // Ein zu enges Muster verwirft ein gueltiges Token, und der
             // Schaden ist derselbe wie bei einem verlorenen.
             return preg_match('/^[A-Za-z0-9_.\-]{0,64}$/', $s) === 1;
         case 'mqtt_topic':
-            return preg_match('#^[A-Za-z0-9_/\-]{1,64}$#', $s) === 1;
+            // Kein Schraegstrich am Rand und kein doppelter (O2): das Plugin
+            // haette ihn sonst beim Senden still entfernt.
+            return preg_match('#^[A-Za-z0-9_\-]+(/[A-Za-z0-9_\-]+)*$#', $s) === 1 && strlen($s) <= 64;
         case 'mqtt_vollsend_min':
             return preg_match('/^[0-9]{1,4}$/', $s) === 1 && (int) $s <= 1440;
         case 'takt':
@@ -3508,9 +4140,10 @@ function ev_wert_pruefen($schluessel, $wert)
 function ev_sicherung_lesen($roh)
 {
     $mangel = array();
+    $hinweise = array();
     $daten = json_decode((string) $roh, true);
     if (!is_array($daten)) {
-        return array(null, array(ev_t('EINST.SICH_KEIN_JSON')), 0);
+        return array(null, array(ev_t('EINST.SICH_KEIN_JSON')), 0, array());
     }
     $neu = ev_vorgaben();
     $bekannt = array_keys($neu);
@@ -3532,11 +4165,30 @@ function ev_sicherung_lesen($roh)
             $mangel[] = sprintf(ev_t('EINST.SICH_WERT_FORM'), ev_e((string) $k));
             continue;
         }
+        /* Ein Wert mit Leerzeichen am Rand wird abgewiesen und benannt, nicht
+         * getrimmt (C9, O3, seit 0.9.34). */
+        if (is_string($w) && $w !== trim($w)) {
+            $mangel[] = sprintf(ev_t('EINST.SICH_WERT_RAND'), ev_e((string) $k));
+            continue;
+        }
+        /* Ein LEERES Aktionstoken in der Sicherung heisst "keins gesichert"
+         * (O3, Regeln/05, VolkswagenID-Aufloesung): das geltende bleibt, und
+         * die Seite sagt es. Bis 0.9.33 wurde es uebernommen - danach
+         * antwortete der Endpunkt jedem Virtuellen Eingang mit 503, und die
+         * Meldung lautete "12 Werte uebernommen" (Pruefbericht oberflaeche,
+         * Befund 4). */
+        if ($k === 'aktionstoken' && (string) $w === '') {
+            $ev_jetzt = (string) ev_config()['aktionstoken'];
+            $neu[$k] = $ev_jetzt;
+            $hinweise[] = ev_t($ev_jetzt !== '' ? 'EINST.SICH_TOKEN_BLEIBT' : 'EINST.SICH_TOKEN_KEINS');
+            $anzahl++;
+            continue;
+        }
         if (!ev_wert_pruefen($k, $w)) {
             $mangel[] = sprintf(ev_t('EINST.SICH_WERT_UNZULAESSIG'), ev_e((string) $k));
             continue;
         }
-        $neu[$k] = is_string($w) ? trim($w) : $w;
+        $neu[$k] = $w;
         $anzahl++;
     }
     if ($anzahl === 0) {
@@ -3544,21 +4196,11 @@ function ev_sicherung_lesen($roh)
     }
     /* FEHLENDE Schluessel sind eine Beanstandung, kein stiller Rueckfall.
      *
-     * Bis hierher war die Vorgabenliste der Ausgangspunkt, und nur was in
-     * der Datei stand wurde darueber geschrieben. Eine Datei mit einem
-     * einzigen Schluessel lief damit ohne Beanstandung durch, wurde
-     * gespeichert, und alle uebrigen Einstellungen fielen auf Werk
-     * zurueck - quittiert mit "1 Wert uebernommen".
-     *
-     * Gemessen an VolkswagenID 0.9.11 am 03.09.2026 unter PHP 7.4 und 8.4:
-     * dort fiel dabei auch das Aktionstoken auf '', und jede im Miniserver
-     * eingetragene Adresse war stumm ungueltig. Am 07.09.2026 ueber den
-     * Bestand ausgerollt (30 Linien).
-     *
-     * Der Hausstandard sagt: eine halb gueltige Datei aendert gar nichts.
-     * Verglichen wird gegen die VORGABEN, nicht gegen $bekannt: was
-     * ausserhalb der Konfigurationsdatei liegt - Zugangsdaten in einer
-     * eigenen Datei - faellt nicht auf Werk zurueck und darf hier fehlen. */
+     * Eine Datei mit einem einzigen Schluessel lief bis 0.9.26 ohne
+     * Beanstandung durch, und alle uebrigen Einstellungen fielen auf Werk
+     * zurueck - quittiert mit "1 Wert uebernommen" (gemessen an VolkswagenID
+     * 0.9.11 am 03.09.2026, am 07.09.2026 ueber den Bestand ausgerollt). Der
+     * Hausstandard sagt: eine halb gueltige Datei aendert gar nichts. */
     $fehlend = array();
     foreach (array_keys(ev_vorgaben()) as $fk) {
         if (!array_key_exists($fk, $daten)) {
@@ -3569,7 +4211,24 @@ function ev_sicherung_lesen($roh)
         $mangel[] = sprintf(ev_t('EINST.SICH_FEHLEND'), count($fehlend),
             htmlspecialchars(implode(', ', $fehlend), ENT_QUOTES, 'UTF-8'));
     }
-    return array($mangel ? null : $neu, $mangel, $anzahl);
+    return array($mangel ? null : $neu, $mangel, $anzahl, $mangel ? array() : $hinweise);
+}
+
+/**
+ * Die Sicherung, die "Einstellungen sichern" ausgibt (O3, seit 0.9.34): der
+ * lesbare Kopf und NUR die bekannten Schluessel. Bis 0.9.33 ging die ganze
+ * Konfiguration hinaus; stand darin ein fremder Schluessel (Rest einer
+ * Handbearbeitung), wies das Zurueckspielen die eigene Sicherung ab
+ * (Pruefbericht oberflaeche, Befund 6).
+ */
+function ev_sicherung_bauen()
+{
+    return array(
+        '_hinweis' => 'Sicherung des LoxBerry-Plugins EVCC. Enthaelt das '
+                    . 'Aktionstoken dieser Anlage und gegebenenfalls das '
+                    . 'EVCC-Passwort - wie ein Passwort behandeln.',
+        '_stand'   => date('Y-m-d H:i:s'),
+    ) + array_intersect_key(ev_config(), ev_vorgaben());
 }
 
 
@@ -3623,17 +4282,10 @@ function ev_merkwort()
     if (!is_dir($verz)) {
         @mkdir($verz, 0775, true);
     }
-    /* Rechte VOR dem Inhalt: zwischen Anlegen und chmod laege sonst ein
-     * Fenster, in dem das Merkwort fuer alle lesbar ist. */
-    $tmp = $datei . '.tmp';
-    if (@file_put_contents($tmp, $neu) !== false) {
-        @chmod($tmp, 0600);
-        if (@rename($tmp, $datei)) {
-            @chmod($datei, 0600);
-        } else {
-            @unlink($tmp);
-        }
-    }
+    /* Rechte VOR dem Inhalt - jetzt wirklich (C7, seit 0.9.34). Bis 0.9.33
+     * stand dieser Satz hier ueber einem file_put_contents mit anschliessendem
+     * chmod, also dem Gegenteil (Pruefbericht code, Befund 7). */
+    ev_datei_schreiben($datei, $neu, 0600);
     $wort = $neu;
     return $wort;
 }

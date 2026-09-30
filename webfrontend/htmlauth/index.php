@@ -34,6 +34,12 @@ if ($ev_home !== '' && file_exists($ev_home . '/libs/phplib/loxberry_system.php'
     $ev_p = ev_paths();   // nach dem Einbinden neu holen
 }
 
+/* Wie stand die Konfiguration da, BEVOR ev_config() sie heilen konnte? (O6)
+ * Der Reiter Test zeigt das in der Zeile "Ist die Konfiguration heil?"; nach
+ * dem ersten ev_config() waere die Frage schon beantwortet und die Antwort
+ * immer "ok". */
+$GLOBALS['ev_konfig_lage_vorher'] = ev_konfig_lage();
+
 /* Wer einen Reiter hinzufuegt, muss DREI Stellen mitziehen: die Reiterleiste,
    den Bereich (sm-seite mit gleicher id) und diese Positivliste. Fehlt der
    Name hier, springt die Seite nach jedem Absenden zurueck auf Einstellungen.
@@ -98,11 +104,23 @@ if ($ev_post && isset($_POST['vorlage'])) {
     exit;
 }
 
-/* ================= Protokoll leeren ================= */
+/* ================= Protokoll leeren =================
+   Nur mit Haken, und die Meldung haengt am Rueckgabewert (O11, seit 0.9.34).
+   Bis 0.9.33 leerte der Knopf ohne Rueckfrage und sagte nichts - auch nicht,
+   wenn das Schreiben scheiterte (Pruefbericht oberflaeche, Befund 17). */
 if ($ev_post && isset($_POST['clearlog'])) {
-    $ev_lf = ev_paths()['log'];
-    @mkdir(dirname($ev_lf), 0775, true);
-    @file_put_contents($ev_lf, '[' . date('Y-m-d H:i:s') . "] Protokoll geleert (Oberflaeche)\n");
+    if (empty($_POST['clearlog_ok'])) {
+        $ev_fehler[] = ev_t('LOG.LEEREN_HAKEN');
+    } else {
+        $ev_lf = ev_paths()['log'];
+        @mkdir(dirname($ev_lf), 0775, true);
+        $ev_lz = '[' . date('Y-m-d H:i:s') . "] Protokoll geleert (Oberflaeche)\n";
+        if (@file_put_contents($ev_lf, $ev_lz) === strlen($ev_lz)) {
+            $ev_meldungen[] = ev_t('LOG.GELEERT');
+        } else {
+            $ev_fehler[] = sprintf(ev_t('LOG.LEEREN_FEHL'), ev_e($ev_lf));
+        }
+    }
     $ev_tab = 'tab-log';
 }
 
@@ -138,35 +156,40 @@ if ($ev_post && isset($_POST['speichern'])) {
      *
      * Ein leeres Feld loescht nichts: sonst waere das Passwort nach jedem
      * Speichern weg, weil es aus Sicherheitsgruenden nicht angezeigt wird. */
-    if (isset($_POST['passwort']) && is_string($_POST['passwort'])) {
-        $ev_pw = trim(preg_replace('/[\x00-\x1F\x7F]/', '', (string) $_POST['passwort']));
-        if ($ev_pw !== (string) $_POST['passwort'] && (string) $_POST['passwort'] !== '') {
+    /* Das Passwort: Steuerzeichen und Leerzeichen am Rand werden ABGEWIESEN,
+     * mit dem Satz, der zum Fehler passt (O2, seit 0.9.34). Bis 0.9.33 hiess
+     * es auch bei " geheim" (Leerzeichen am Rand), es enthalte Steuerzeichen
+     * (Pruefbericht oberflaeche, Befund 3). Am Rand ginge ein Leerzeichen in
+     * der Kopfzeile 'Authorization: Bearer ...' verloren. */
+    if (isset($_POST['passwort']) && is_string($_POST['passwort']) && (string) $_POST['passwort'] !== '') {
+        $ev_pw = (string) $_POST['passwort'];
+        if (preg_match('/[\x00-\x1F\x7F]/', $ev_pw)) {
             $ev_fehler[] = ev_t('EINST.FEHLER_PASSWORT_ZEICHEN');
-        } elseif ($ev_pw !== '') {
+        } elseif ($ev_pw !== trim($ev_pw)) {
+            $ev_fehler[] = ev_t('EINST.FEHLER_PASSWORT_RAND');
+        } elseif (!ev_wert_pruefen('passwort', $ev_pw)) {
+            $ev_fehler[] = ev_t('EINST.FEHLER_PASSWORT_LANG');
+        } else {
             $ev_cfg['passwort'] = $ev_pw;
         }
     }
     if (!empty($_POST['passwort_loeschen'])) { $ev_cfg['passwort'] = ''; }
 
-    $ev_takt = (int) (isset($_POST['takt']) ? $_POST['takt'] : 15);
-    if ($ev_takt < 5 || $ev_takt > 60) {
-        $ev_fehler[] = sprintf(ev_t('EINST.FEHLER_BEREICH'), ev_t('EINST.L_TAKT'), 5, 60);
-    } else {
-        $ev_cfg['takt'] = $ev_takt;
-    }
-
-    $ev_lp = (int) (isset($_POST['ladepunkte']) ? $_POST['ladepunkte'] : 2);
-    if ($ev_lp < 0 || $ev_lp > EV_LADEPUNKTE) {
-        $ev_fehler[] = sprintf(ev_t('EINST.FEHLER_BEREICH'), ev_t('EINST.L_LADEPUNKTE'), 0, EV_LADEPUNKTE);
-    } else {
-        $ev_cfg['ladepunkte'] = $ev_lp;
-    }
-
-    $ev_fz = (int) (isset($_POST['fahrzeuge']) ? $_POST['fahrzeuge'] : 2);
-    if ($ev_fz < 0 || $ev_fz > EV_FAHRZEUGE) {
-        $ev_fehler[] = sprintf(ev_t('EINST.FEHLER_BEREICH'), ev_t('EINST.L_FAHRZEUGE'), 0, EV_FAHRZEUGE);
-    } else {
-        $ev_cfg['fahrzeuge'] = $ev_fz;
+    /* Takt, Ladepunkte, Fahrzeuge: ABGEWIESEN statt gerundet (O2, seit
+     * 0.9.34). Bis 0.9.33 wurde aus 15.7 still 15, aus 20abc 20 und aus 1.9
+     * ein Ladepunkt - gemeldet als "Einstellungen gespeichert" (Pruefbericht
+     * oberflaeche, Befund 2). Dieselbe Regel wie beim Zurueckspielen. */
+    $ev_lp_alt = (int) $ev_cfg['ladepunkte'];
+    $ev_fz_alt = (int) $ev_cfg['fahrzeuge'];
+    foreach (array('takt' => array('EINST.L_TAKT', 5, 60),
+                   'ladepunkte' => array('EINST.L_LADEPUNKTE', 0, EV_LADEPUNKTE),
+                   'fahrzeuge' => array('EINST.L_FAHRZEUGE', 0, EV_FAHRZEUGE)) as $ev_k => $ev_r) {
+        $ev_roh = (isset($_POST[$ev_k]) && is_string($_POST[$ev_k])) ? (string) $_POST[$ev_k] : '';
+        if (!ev_wert_pruefen($ev_k, $ev_roh)) {
+            $ev_fehler[] = sprintf(ev_t('EINST.FEHLER_GANZZAHL'), ev_t($ev_r[0]), $ev_r[1], $ev_r[2]);
+        } else {
+            $ev_cfg[$ev_k] = (int) $ev_roh;
+        }
     }
 
     /* mqtt_ein und mqtt_topic werden hier NICHT mehr angefasst: sie
@@ -182,6 +205,14 @@ if ($ev_post && isset($_POST['speichern'])) {
         if (ev_config_write($ev_cfg)) {
             $ev_meldungen[] = ev_t('EINST.GESPEICHERT');
             ev_log('Einstellungen gespeichert');
+            /* Weniger Ladepunkte oder Fahrzeuge: deren retained Themen raeumen
+             * (M3, seit 0.9.34) - sonst stuenden sie fuer immer im Broker. */
+            foreach (ev_mqtt_abraeumen_nach(array('mqtt_topic' => $ev_cfg['mqtt_topic'],
+                         'mqtt_ein' => $ev_cfg['mqtt_ein'], 'ladepunkte' => $ev_lp_alt,
+                         'fahrzeuge' => $ev_fz_alt), $ev_cfg) as $ev_a) {
+                if ($ev_a[1] === '') { continue; }
+                if ($ev_a[0] === 0) { $ev_meldungen[] = $ev_a[1]; } else { $ev_fehler[] = $ev_a[1]; }
+            }
         } else {
             $ev_fehler[] = sprintf(ev_t('EINST.FEHLER_SPEICHERN'), ev_e(ev_paths()['config']));
         }
@@ -197,15 +228,20 @@ if ($ev_post && isset($_POST['speichern'])) {
  * Werte, die er nie gesehen hat. */
 if ($ev_post && isset($_POST['save_mqtt'])) {
     $ev_mcfg = ev_config();
+    $ev_m_alt_ein = !empty($ev_mcfg['mqtt_ein']);
+    $ev_m_alt_topic = (string) $ev_mcfg['mqtt_topic'];
     $ev_mcfg['mqtt_ein'] = isset($_POST['mqtt_ein']) ? 1 : 0;
-    $ev_mtopic = trim(preg_replace('/[\x00-\x1F\x7F"\']/', '',
-        (string) (isset($_POST['mqtt_topic']) ? $_POST['mqtt_topic'] : '')));
-    if ($ev_mtopic === '' || !preg_match('#^[A-Za-z0-9_/\-]{1,64}$#', $ev_mtopic)) {
+    /* ABGEWIESEN statt verbogen (O2, seit 0.9.34): bis 0.9.33 wurden
+     * Anfuehrungszeichen still entfernt (evcc"2lox wurde evcc2lox) und
+     * Schraegstriche am Rand abgeschnitten (Pruefbericht oberflaeche,
+     * Befund 2). Dieselbe Regel wie beim Zurueckspielen (ev_wert_pruefen). */
+    $ev_mtopic = (isset($_POST['mqtt_topic']) && is_string($_POST['mqtt_topic'])) ? (string) $_POST['mqtt_topic'] : '';
+    if (!ev_wert_pruefen('mqtt_topic', $ev_mtopic)) {
         $ev_fehler[] = ev_t('EINST.FEHLER_TOPIC');
     } else {
-        $ev_mcfg['mqtt_topic'] = trim($ev_mtopic, '/');
+        $ev_mcfg['mqtt_topic'] = $ev_mtopic;
     }
-    $ev_mvoll = trim((string) (isset($_POST['mqtt_vollsend_min']) ? $_POST['mqtt_vollsend_min'] : ''));
+    $ev_mvoll = (isset($_POST['mqtt_vollsend_min']) && is_string($_POST['mqtt_vollsend_min'])) ? (string) $_POST['mqtt_vollsend_min'] : '';
     if (!ev_wert_pruefen('mqtt_vollsend_min', $ev_mvoll)) {
         $ev_fehler[] = ev_t('EINST.FEHLER_VOLLSEND');
     } else {
@@ -214,6 +250,20 @@ if ($ev_post && isset($_POST['save_mqtt'])) {
     if (!$ev_fehler) {
         if (ev_config_write($ev_mcfg)) {
             $ev_meldungen[] = ev_t('EINST.GESPEICHERT');
+            /* Abraeumen (M3, seit 0.9.34): beim Praefixwechsel das ALTE
+             * Praefix, beim Abschalten das eingestellte - mit Ruecklesen am
+             * Broker und einem Satz hier. ERST schreiben, dann raeumen: ein
+             * Abruf, der gerade laeuft, nimmt ab seinem naechsten Durchlauf
+             * die neue Einstellung; was er noch unter dem alten Praefix
+             * sendet, fangen die Runden mit Ruecklesen ab. Bis 0.9.33 blieben
+             * die Zustaende unter dem alten Praefix fuer immer stehen
+             * (Pruefbericht mqtt, B3). */
+            foreach (ev_mqtt_abraeumen_nach(array('mqtt_topic' => $ev_m_alt_topic,
+                         'mqtt_ein' => $ev_m_alt_ein ? 1 : 0, 'ladepunkte' => $ev_mcfg['ladepunkte'],
+                         'fahrzeuge' => $ev_mcfg['fahrzeuge']), $ev_mcfg) as $ev_a) {
+                if ($ev_a[1] === '') { continue; }
+                if ($ev_a[0] === 0) { $ev_meldungen[] = $ev_a[1]; } else { $ev_fehler[] = $ev_a[1]; }
+            }
         } else {
             // Bis 0.9.26 fehlte dieser Zweig: schlug das Schreiben fehl
             // (Rechte, volle Karte), kam weder Erfolgs- noch Fehlermeldung
@@ -243,12 +293,8 @@ if ($ev_post && isset($_POST['ev_sichern'])) {
      * Die Schluessel beginnen mit einem Unterstrich; ev_sicherung_lesen()
      * uebergeht genau diese und beanstandet sie nicht (bis 0.9.26 haette es
      * die eigene Datei damit abgelehnt). */
-    $ev_sich = array(
-        '_hinweis' => 'Sicherung des LoxBerry-Plugins EVCC. Enthaelt das '
-                    . 'Aktionstoken dieser Anlage und gegebenenfalls das '
-                    . 'EVCC-Passwort - wie ein Passwort behandeln.',
-        '_stand'   => date('Y-m-d H:i:s'),
-    ) + ev_config();
+    /* Nur die bekannten Schluessel (O3, seit 0.9.34): ev_sicherung_bauen(). */
+    $ev_sich = ev_sicherung_bauen();
     $ev_js = json_encode($ev_sich,
         JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     if ($ev_js !== false) {
@@ -274,21 +320,53 @@ if ($ev_post && isset($_POST['ev_zurueck'])) {
     } elseif ((int) $_FILES['ev_sicherung']['size'] > 65536) {
         $ev_fehler[] = ev_t('EINST.SICH_ZU_GROSS');
     } else {
-        list($ev_neu, $ev_mangel, $ev_n) = ev_sicherung_lesen(
+        list($ev_neu, $ev_mangel, $ev_n, $ev_hinw) = ev_sicherung_lesen(
             (string) @file_get_contents($_FILES['ev_sicherung']['tmp_name']));
         if ($ev_neu === null) {
             /* ALLE Beanstandungen, nicht nur die erste - und geaendert wird
              * nichts. */
             $ev_fehler[] = ev_t('EINST.SICH_ABGELEHNT') . ' '
                             . implode(' ', $ev_mangel);
-        } elseif (ev_config_write($ev_neu)) {
+        } elseif (($ev_zalt = ev_config()) && ev_config_write($ev_neu)) {
             $ev_meldungen[] = sprintf(ev_t('EINST.SICH_UEBERNOMMEN'), $ev_n);
+            // Was dabei nicht uebernommen, sondern behalten wurde (O3).
+            foreach ($ev_hinw as $ev_h) { $ev_meldungen[] = $ev_h; }
+            /* Eine Sicherung kann das Praefix, den MQTT-Schalter und die Zahl
+             * der Ladepunkte aendern - dann dasselbe Abraeumen wie beim
+             * Speichern (M3). */
+            foreach (ev_mqtt_abraeumen_nach($ev_zalt, $ev_neu) as $ev_a) {
+                if ($ev_a[1] === '') { continue; }
+                if ($ev_a[0] === 0) { $ev_meldungen[] = $ev_a[1]; } else { $ev_fehler[] = $ev_a[1]; }
+            }
         } else {
             $ev_fehler[] = ev_t('EINST.SICH_SCHREIBFEHLER');
         }
     }
 }
 
+/* ================= JEDER POST ENDET MIT EINER UMLEITUNG (O1, seit 0.9.34) =================
+ *
+ * Regeln/04: header('Location: index.php?form=...', true, 303) und exit; das
+ * Ergebnis reist als Einmalmeldung (data/plugins/<ordner>/einmalmeldung.json,
+ * 0600, 120 s gueltig, nur beim GET gelesen und dabei geloescht). Bis 0.9.33
+ * lieferte jeder POST die Seite direkt: F5 nach "Token neu erzeugen" wuerfelte
+ * neu, F5 nach "EVCC neu starten" startete erneut, F5 nach "EVCC jetzt
+ * aktualisieren" lief ohne die Rueckfrage noch einmal (Pruefbericht
+ * oberflaeche, Befund 1). Downloads (Vorlage, Sicherung) sind oben schon mit
+ * exit fertig. Auch die Abweisung durch den Wachposten geht diesen Weg. */
+if ($ev_post) {
+    if (!ev_meldung_ablegen(array('meldungen' => $ev_meldungen, 'fehler' => $ev_fehler))) {
+        ev_log('Die Einmalmeldung liess sich nicht schreiben - das Ergebnis des letzten '
+            . 'Knopfdrucks ist nach der Umleitung nicht zu sehen.');
+    }
+    header('Location: index.php?form=' . substr($ev_tab, 4), true, 303);
+    exit;
+}
+$ev_einmal = ev_meldung_abholen();
+if ($ev_einmal !== null) {
+    $ev_meldungen = array_merge($ev_meldungen, $ev_einmal['meldungen']);
+    $ev_fehler = array_merge($ev_fehler, $ev_einmal['fehler']);
+}
 
 if (class_exists('LBWeb', false)) {
     LBWeb::lbheader(ev_t('ALLG.TITEL'), 'https://docs.evcc.io/', 'help.html');
@@ -413,13 +491,25 @@ if (class_exists('LBWeb', false)) {
 <?php
 $ev_da = ev_dienst_vorhanden();
 $ev_laeuft = ev_dienst_laeuft();
-$ev_stand = ev_state();
+/* Nur der Zwischenspeicher des Abrufdienstes, keine eigene Anfrage an EVCC
+ * (O4, seit 0.9.34). Bis 0.9.33 fragte JEDER Seitenaufruf EVCC mit bis zu
+ * 8 s Zeitgrenze - bei haengendem EVCC wartete man auf jedem Reiter
+ * (Pruefbericht oberflaeche, Befund 7). */
+$ev_stand = ev_state_gespeichert();
+$ev_tokneu = ev_token_neu();
 ?>
+<?php if ($ev_tokneu !== null) { ?>
+<div class="sm-warnung"><?= sprintf(ev_t('EINST.TOKEN_NEU'), ev_e(date('d.m.Y H:i', $ev_tokneu[0])), ev_e($ev_tokneu[1])) ?></div>
+<?php } ?>
 <div class="sm-kacheln">
   <div class="sm-kachel"><?= ev_e(ev_t('KACHEL.EVCC')) ?>
     <b class="<?= $ev_laeuft ? 'sm-an' : 'sm-aus' ?>"><?= ev_e($ev_laeuft ? ev_t('ALLG.LAEUFT') : ev_t('ALLG.GESTOPPT')) ?></b></div>
   <div class="sm-kachel"><?= ev_e(ev_t('KACHEL.VERBINDUNG')) ?>
+    <?php if (empty($ev_stand['stand']) && empty($ev_stand['fehler'])) { ?>
+    <b><?= ev_e(ev_t('ALLG.UNBEKANNT')) ?></b></div>
+    <?php } else { ?>
     <b class="<?= !empty($ev_stand['ok']) ? 'sm-an' : 'sm-aus' ?>"><?= ev_e(!empty($ev_stand['ok']) ? ev_t('ALLG.OK') : ev_t('ALLG.FEHLER')) ?></b></div>
+    <?php } ?>
   <div class="sm-kachel"><?= ev_e(ev_t('KACHEL.VERSION')) ?>
     <b style="font-size:1.0em;"><?= ev_e($ev_da ? ev_dienst_version() : '-') ?></b></div>
 </div>
@@ -605,7 +695,7 @@ if ($ev_link !== $ev_cfg['url']) { ?>
 <input data-role="none" type="hidden" name="activetab" value="tab-mqtt">
 <h2><?= ev_e(ev_t('EINST.H_MQTT')) ?></h2>
 <?php /* Hier stand bis 0.9.10 eine zweite, eingebettete Autostart-Pruefung
-         mit hart verdrahtetem /opt/loxberry. Sie las den RICHTIGEN Schluessel
+         mit hart verdrahteter LoxBerry-Wurzel. Sie las den RICHTIGEN Schluessel
          (Gatewayautostart), waehrend ev_mqtt_zustand() 21 Zeilen weiter unten
          den falschen las - zwei Wege fuer dieselbe Frage, einer davon falsch.
          Jetzt gibt es nur noch ev_mqtt_zustand(), und der stimmt. */ ?>
@@ -623,7 +713,7 @@ if ($ev_link !== $ev_cfg['url']) { ?>
 <div class="sm-feld">
   <label for="mqtt_vollsend_min"><?= ev_e(ev_t('EINST.L_MQTT_VOLLSEND')) ?></label>
   <input data-role="none" type="number" id="mqtt_vollsend_min" name="mqtt_vollsend_min" value="<?= (int) $ev_cfg['mqtt_vollsend_min'] ?>" min="0" max="1440">
-  <div class="sm-hilfe"><?= ev_t('EINST.H_MQTT_VOLLSEND') ?></div>
+  <div class="sm-hilfe"><?= ev_t(ev_gateway_schluessel('EINST.H_MQTT_VOLLSEND')) ?></div>
 </div>
 <div class="sm-legende"><span><i class="sm-punkt sm-b-aktion"></i> <?= ev_t('LEGENDE.AKTION') ?></span></div>
 <div class="sm-knopfreihe">
@@ -648,7 +738,7 @@ if ($ev_link !== $ev_cfg['url']) { ?>
 
 <h3><?= ev_e(ev_t('MQTT.H_THEMEN')) ?></h3>
 <p class="sm-hilfe"><?= ev_t('MQTT.THEMEN_TEXT') ?></p>
-<p class="sm-hilfe"><?= ev_t('MQTT.RETAIN_TEXT') ?></p>
+<p class="sm-hilfe"><?= ev_t(ev_gateway_schluessel('MQTT.RETAIN_TEXT')) ?></p>
 <table class="sm-tbl">
 <tr><th><?= ev_e(ev_t('MQTT.T_THEMA')) ?></th><th><?= ev_e(ev_t('MQTT.T_BEDEUTUNG')) ?></th><th><?= ev_e(ev_t('MQTT.T_RETAIN')) ?></th><th><?= ev_e(ev_t('MQTT.T_EVCC')) ?></th></tr>
 <?php foreach (ev_felder() as $ev_name => $ev_d) {
@@ -746,9 +836,12 @@ foreach (ev_befehle() as $ev_a => $ev_b) {
     $ev_adr = '&amp;aktion=' . $ev_a . ($ev_b['ebene'] === 'lp' ? '&amp;lp=1' : '');
     if ($ev_b['pruef'] === 'ohne')          { $ev_adr .= ''; }
     elseif ($ev_b['pruef'] === 'schalter')  { $ev_adr .= '&amp;wert=1|0'; }
-    elseif ($ev_b['pruef'] === 'plan')      { $ev_adr .= '&amp;wert=&lt;v.0&gt;&amp;stunden=&lt;v.1&gt;'; }
+    elseif ($ev_b['pruef'] === 'plan')      { $ev_adr .= '&amp;wert=&lt;ziel&gt;&amp;stunden=&lt;vorlauf&gt;'; }
+    elseif ($ev_b['pruef'] === 'planziel' || $ev_b['pruef'] === 'planstunden') { $ev_adr .= '&amp;wert=&lt;v&gt;'; }
     else                                    { $ev_adr .= '&amp;wert=&lt;v.0&gt;'; }
     $ev_bed = ev_t($ev_b['text']);
+    // Ein Befehl, der nicht in die Vorlage geht, sagt warum (C11).
+    if (isset($ev_b['vorlage']) && empty($ev_b['vorlage'])) { $ev_bed .= ' ' . ev_t('LOX.NICHT_IN_VORLAGE'); }
     if ($ev_a === 'modus')        { $ev_bed .= ' (0=off, 1=now, 2=minpv, 3=pv)'; }
     if ($ev_a === 'batteriemodus'){ $ev_bed .= ' (0=normal, 1=hold, 2=charge)'; }
 ?>
@@ -790,6 +883,7 @@ foreach (ev_befehle() as $ev_a => $ev_b) {
 <tr><td><span class="sm-mono">EVCC_PREIS_RANG</span></td><td><?= ev_t('SPOT.Z_RANG') ?></td></tr>
 <tr><td><span class="sm-mono">EVCC_PREIS_STUNDEN</span></td><td><?= ev_t('SPOT.Z_ANZAHL') ?></td></tr>
 <tr><td><span class="sm-mono">EVCC_PREIS_GUENSTIGSTE_STUNDE</span></td><td><?= ev_t('SPOT.Z_BESTE') ?></td></tr>
+<tr><td><span class="sm-mono">EVCC_PREIS_OK</span></td><td><?= ev_t('SPOT.Z_OK') ?></td></tr>
 </table>
 <div class="sm-hinweis"><?= ev_t('SPOT.RANG_REZEPT') ?></div>
 </div>
@@ -866,16 +960,20 @@ foreach (ev_befehle() as $ev_a => $ev_b) {
 <?= ev_t('LOX.S4') ?>
 <table class="sm-tbl">
 <tr><th>#</th><th><?= ev_e(ev_t('LOX.T_BAUSTEIN')) ?></th><th><?= ev_e(ev_t('LOX.T_NAME')) ?></th><th><?= ev_e(ev_t('LOX.T_PARAMETER')) ?></th><th><?= ev_e(ev_t('LOX.T_VERBINDEN')) ?></th></tr>
-<tr><td>1</td><td><?= ev_t('BAUSTEIN.B1_TYP') ?></td><td><span class="sm-mono">EVCC</span></td><td><?= ev_t('BAUSTEIN.B1_PARAM') ?></td><td><?= ev_t('BAUSTEIN.B1_VERB') ?></td></tr>
-<tr><td>2</td><td><?= ev_t('BAUSTEIN.B2_TYP') ?></td><td><span class="sm-mono">Energiemanager</span></td><td><?= ev_t('BAUSTEIN.B2_PARAM') ?></td><td><?= ev_t('BAUSTEIN.B2_VERB') ?></td></tr>
-<tr><td>3</td><td><?= ev_t('BAUSTEIN.B3_TYP') ?></td><td><span class="sm-mono">Wallbox Status</span></td><td><?= ev_t('BAUSTEIN.B3_PARAM') ?></td><td><?= ev_t('BAUSTEIN.B3_VERB') ?></td></tr>
-<tr><td>4</td><td><?= ev_t('BAUSTEIN.B4_TYP') ?></td><td><span class="sm-mono">Ladung fertig</span></td><td><?= ev_t('BAUSTEIN.B4_PARAM') ?></td><td><?= ev_t('BAUSTEIN.B4_VERB') ?></td></tr>
-<tr><td>5</td><td><?= ev_t('BAUSTEIN.B5_TYP') ?></td><td><span class="sm-mono">EVCC stumm</span></td><td><?= ev_t('BAUSTEIN.B5_PARAM') ?></td><td><?= ev_t('BAUSTEIN.B5_VERB') ?></td></tr>
-<tr><td>6</td><td><?= ev_t('BAUSTEIN.B6_TYP') ?></td><td><span class="sm-mono">EVCC Stoerung</span></td><td><?= ev_t('BAUSTEIN.B6_PARAM') ?></td><td><?= ev_t('BAUSTEIN.B6_VERB') ?></td></tr>
-<tr><td>7</td><td><?= ev_t('BAUSTEIN.B7_TYP') ?></td><td><span class="sm-mono">EVCC Meldung</span></td><td><?= ev_t('BAUSTEIN.B7_PARAM') ?></td><td><?= ev_t('BAUSTEIN.B7_VERB') ?></td></tr>
-<tr><td>8</td><td><?= ev_t('BAUSTEIN.B8_TYP') ?></td><td><span class="sm-mono">Guenstige Stunde</span></td><td><?= ev_t('BAUSTEIN.B8_PARAM') ?></td><td><?= ev_t('BAUSTEIN.B8_VERB') ?></td></tr>
-<tr><td>9</td><td><?= ev_t('BAUSTEIN.B9_TYP') ?></td><td><span class="sm-mono">Abfahrtszeit</span></td><td><?= ev_t('BAUSTEIN.B9_PARAM') ?></td><td><?= ev_t('BAUSTEIN.B9_VERB') ?></td></tr>
-<tr><td>10</td><td><?= ev_t('BAUSTEIN.B10_TYP') ?></td><td><span class="sm-mono">Solarprognose</span></td><td><?= ev_t('BAUSTEIN.B10_PARAM') ?></td><td><?= ev_t('BAUSTEIN.B10_VERB') ?></td></tr>
+<?php /* Namen aus den Sprachdateien (O7) und die Titel der Ausgaenge aus
+         derselben Quelle wie die Vorlage (O8, ev_befehl_titel()). Bis 0.9.33
+         standen die Namen fest auf Deutsch, in Umschrift, und #8/#9 nannten
+         Ausgaenge ohne den seit 0.9.27 geltenden Vorsatz SET_. */ ?>
+<tr><td>1</td><td><?= ev_t('BAUSTEIN.B1_TYP') ?></td><td><span class="sm-mono"><?= ev_e(ev_t('BAUSTEIN.B1_NAME')) ?></span></td><td><?= ev_t('BAUSTEIN.B1_PARAM') ?></td><td><?= ev_t('BAUSTEIN.B1_VERB') ?></td></tr>
+<tr><td>2</td><td><?= ev_t('BAUSTEIN.B2_TYP') ?></td><td><span class="sm-mono"><?= ev_e(ev_t('BAUSTEIN.B2_NAME')) ?></span></td><td><?= ev_t('BAUSTEIN.B2_PARAM') ?></td><td><?= ev_t('BAUSTEIN.B2_VERB') ?></td></tr>
+<tr><td>3</td><td><?= ev_t('BAUSTEIN.B3_TYP') ?></td><td><span class="sm-mono"><?= ev_e(ev_t('BAUSTEIN.B3_NAME')) ?></span></td><td><?= ev_t('BAUSTEIN.B3_PARAM') ?></td><td><?= ev_t('BAUSTEIN.B3_VERB') ?></td></tr>
+<tr><td>4</td><td><?= ev_t('BAUSTEIN.B4_TYP') ?></td><td><span class="sm-mono"><?= ev_e(ev_t('BAUSTEIN.B4_NAME')) ?></span></td><td><?= ev_t('BAUSTEIN.B4_PARAM') ?></td><td><?= ev_t('BAUSTEIN.B4_VERB') ?></td></tr>
+<tr><td>5</td><td><?= ev_t('BAUSTEIN.B5_TYP') ?></td><td><span class="sm-mono"><?= ev_e(ev_t('BAUSTEIN.B5_NAME')) ?></span></td><td><?= ev_t('BAUSTEIN.B5_PARAM') ?></td><td><?= ev_t('BAUSTEIN.B5_VERB') ?></td></tr>
+<tr><td>6</td><td><?= ev_t('BAUSTEIN.B6_TYP') ?></td><td><span class="sm-mono"><?= ev_e(ev_t('BAUSTEIN.B6_NAME')) ?></span></td><td><?= ev_t('BAUSTEIN.B6_PARAM') ?></td><td><?= ev_t('BAUSTEIN.B6_VERB') ?></td></tr>
+<tr><td>7</td><td><?= ev_t('BAUSTEIN.B7_TYP') ?></td><td><span class="sm-mono"><?= ev_e(ev_t('BAUSTEIN.B7_NAME')) ?></span></td><td><?= ev_t('BAUSTEIN.B7_PARAM') ?></td><td><?= ev_t('BAUSTEIN.B7_VERB') ?></td></tr>
+<tr><td>8</td><td><?= ev_t('BAUSTEIN.B8_TYP') ?></td><td><span class="sm-mono"><?= ev_e(ev_t('BAUSTEIN.B8_NAME')) ?></span></td><td><?= ev_t('BAUSTEIN.B8_PARAM') ?></td><td><?= sprintf(ev_t('BAUSTEIN.B8_VERB'), ev_e(ev_befehl_titel('modus', 1))) ?></td></tr>
+<tr><td>9</td><td><?= ev_t('BAUSTEIN.B9_TYP') ?></td><td><span class="sm-mono"><?= ev_e(ev_t('BAUSTEIN.B9_NAME')) ?></span></td><td><?= ev_t('BAUSTEIN.B9_PARAM') ?></td><td><?= sprintf(ev_t('BAUSTEIN.B9_VERB'), ev_e(ev_befehl_titel('plansoc_ziel', 1)), ev_e(ev_befehl_titel('plansoc_stunden', 1))) ?></td></tr>
+<tr><td>10</td><td><?= ev_t('BAUSTEIN.B10_TYP') ?></td><td><span class="sm-mono"><?= ev_e(ev_t('BAUSTEIN.B10_NAME')) ?></span></td><td><?= ev_t('BAUSTEIN.B10_PARAM') ?></td><td><?= ev_t('BAUSTEIN.B10_VERB') ?></td></tr>
 </table>
 <?= ev_t('LOX.S4_ERLAEUTERUNG') ?>
 </div>
@@ -888,8 +986,18 @@ foreach (ev_befehle() as $ev_a => $ev_b) {
 </div>
 
 <!-- ================= Reiter: Test ================= -->
-<div class="sm-seite<?= $ev_tab === 'tab-test' ? ' sm-active' : '' ?>" id="tab-test">
+<?php /* Die Selbstpruefung laeuft NUR, wenn der Reiter Test serverseitig der
+         offene ist (O4, seit 0.9.34; Regeln/04 "Selbstpruefungen, die das
+         Netz befragen ... laufen nur, wenn der Reiter Test serverseitig der
+         offene ist"). Bis 0.9.33 lief sie bei jedem Seitenaufruf, mit zwei
+         Anfragen an EVCC, einem Aufruf des eigenen Endpunkts und zwei
+         sudo-Aufrufen (Pruefbericht oberflaeche, Befund 7). Sonst steht hier
+         ein Verweis; das Skript unten laesst den Reiter dann neu laden. */ ?>
+<div class="sm-seite<?= $ev_tab === 'tab-test' ? ' sm-active' : '' ?>" id="tab-test"<?= $ev_tab === 'tab-test' ? '' : ' data-laden="1"' ?>>
 <h2><?= ev_e(ev_t('TEST.H_SELBSTTEST')) ?></h2>
+<?php if ($ev_tab !== 'tab-test') { ?>
+<div class="sm-hinweis"><?= sprintf(ev_t('TEST.NUR_IM_REITER'), 'index.php?form=test') ?></div>
+<?php } else { ?>
 <p class="sm-hilfe"><?= ev_t('TEST.SELBSTTEST_TEXT') ?></p>
 <?php
 /* Drei Zaehler, nicht zwei.
@@ -923,12 +1031,12 @@ foreach ($ev_pr as $ev_z) {
     <td><?= $ev_z[1] ?></td><td><?= $ev_z[2] ?></td></tr>
 <?php } ?>
 </table>
+<?php } ?>
 
 <h3><?= ev_e(ev_t('TEST.H_KNOEPFE')) ?></h3>
 <div class="sm-legende">
 <span><i class="sm-punkt sm-b-lesen"></i> <?= ev_t('LEGENDE.LESEN') ?></span>
 <span><i class="sm-punkt sm-b-technik"></i> <?= ev_t('LEGENDE.TECHNIK') ?></span>
-<span><i class="sm-punkt sm-b-aktion"></i> <?= ev_t('LEGENDE.AKTION') ?></span>
 </div>
 
 <div class="sm-knopfreihe">
@@ -938,10 +1046,6 @@ foreach ($ev_pr as $ev_z) {
   <?php echo ev_fmt(); ?>
   <input data-role="none" type="hidden" name="testaktion" value="abruf">
   <button data-role="none" class="sm-btn sm-b-lesen" type="submit"><?= ev_e(ev_t('TEST.K_ABRUF')) ?></button></form>
-<form action="index.php" method="post"><input data-role="none" type="hidden" name="activetab" value="tab-test">
-  <?php echo ev_fmt(); ?>
-  <input data-role="none" type="hidden" name="testaktion" value="start">
-  <button data-role="none" class="sm-btn sm-b-lesen" type="submit"><?= ev_e(ev_t('TEST.K_START')) ?></button></form>
 </div>
 
 <div class="sm-knopfreihe">
@@ -958,7 +1062,18 @@ foreach ($ev_pr as $ev_z) {
   <button data-role="none" class="sm-btn sm-b-technik" type="submit"><?= ev_e(ev_t('TEST.K_ZUSATZ')) ?></button></form>
 </div>
 
+<?php /* Die schaltenden Knoepfe unter eigener Ueberschrift, mit einem Satz,
+         dass sie sofort wirken (O10, seit 0.9.34; Regeln/04). "EVCC starten"
+         stand bis 0.9.33 gruen unter den lesenden. Am Token-Knopf steht die
+         Warnung, BEVOR er gedrueckt wird. */ ?>
+<h3><?= ev_e(ev_t('TEST.H_SCHALTEN')) ?></h3>
+<div class="sm-warnung"><?= ev_t('TEST.SCHALTEN_TEXT') ?></div>
+<div class="sm-legende"><span><i class="sm-punkt sm-b-aktion"></i> <?= ev_t('LEGENDE.AKTION') ?></span></div>
 <div class="sm-knopfreihe">
+<form action="index.php" method="post"><input data-role="none" type="hidden" name="activetab" value="tab-test">
+  <?php echo ev_fmt(); ?>
+  <input data-role="none" type="hidden" name="testaktion" value="start">
+  <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= ev_e(ev_t('TEST.K_START')) ?></button></form>
 <form action="index.php" method="post"><input data-role="none" type="hidden" name="activetab" value="tab-test">
   <?php echo ev_fmt(); ?>
   <input data-role="none" type="hidden" name="testaktion" value="restart">
@@ -975,6 +1090,9 @@ foreach ($ev_pr as $ev_z) {
   <?php echo ev_fmt(); ?>
   <input data-role="none" type="hidden" name="testaktion" value="token">
   <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= ev_e(ev_t('TEST.K_TOKEN')) ?></button></form>
+</div>
+<div class="sm-hilfe"><?= ev_t('TEST.K_TOKEN_WARNUNG') ?></div>
+<div class="sm-knopfreihe">
 <?php if (!empty($ev_cfg['update_ein'])) { ?>
 <form action="index.php" method="post"
       onsubmit="return confirm(<?= ev_e(json_encode(strip_tags(html_entity_decode(ev_t('TEST.K_UPDATE_FRAGE'), ENT_QUOTES, 'UTF-8')))) ?>)">
@@ -1015,6 +1133,10 @@ $ev_zeilen = is_file($ev_lf) ? array_slice(file($ev_lf, FILE_IGNORE_NEW_LINES) ?
   <?php echo ev_fmt(); ?>
   <input data-role="none" type="hidden" name="activetab" value="tab-log">
   <input data-role="none" type="hidden" name="clearlog" value="1">
+  <label style="display:inline-flex;align-items:center;gap:8px;font-weight:400;margin-right:10px;">
+    <input data-role="none" type="checkbox" name="clearlog_ok" value="1">
+    <?= ev_e(ev_t('LOG.L_LEEREN_OK')) ?>
+  </label>
   <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= ev_e(ev_t('LOG.K_LEEREN')) ?></button>
 </form>
 </div>
@@ -1033,7 +1155,13 @@ $ev_zeilen = is_file($ev_lf) ? array_slice(file($ev_lf, FILE_IGNORE_NEW_LINES) ?
 		if (history.replaceState) { history.replaceState(null, '', 'index.php?form=' + id.replace('tab-', '')); }
 	}
 	reiter.forEach(function (r) {
-		r.addEventListener('click', function (e) { e.preventDefault(); zeige(r.dataset.ziel); });
+		r.addEventListener('click', function (e) {
+			// Der Reiter Test pruebt nur, wenn der Server ihn ausliefert (O4):
+			// ist er noch nicht geladen, folgt der Klick dem Link.
+			var s = document.getElementById(r.dataset.ziel);
+			if (s && s.dataset.laden === '1') { return; }
+			e.preventDefault(); zeige(r.dataset.ziel);
+		});
 	});
 	zeige(<?= json_encode($ev_tab) ?>);
 })();

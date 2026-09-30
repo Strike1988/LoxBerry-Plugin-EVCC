@@ -9,6 +9,74 @@ Weg nach Loxone: EVCC rechnet in Watt und veröffentlicht unter eigenen Namen,
 der Energiemanager will Kilowatt an vier bestimmten Anschlüssen. Dieses Plugin
 ist der Übersetzer dazwischen.
 
+## Neu in 0.9.34
+
+Durchgang vom 30.09.2026 mit vier Prüfern (Code, Oberfläche, Installer, MQTT).
+Gemessen an Attrappen für EVCC, Broker und Gateway unter PHP 7.4, 8.3 und 8.5,
+nicht am Gerät. Befunde mit Datei:Zeile:
+`Pruefung-Durchgang-2026-09-29/EVCC_BEFUNDE_UND_VERBESSERUNGEN.md`.
+Die Abschnitte zu älteren Fassungen darunter beschreiben den damaligen Stand.
+
+**Preise und Endpunkt**
+
+* **Fällt der Tarifabruf aus, gibt es keine Dauer-Ladefreigabe mehr.** Bisher
+  wurde `PREIS_RANG` dann 0, also „günstigste Stunde“. Jetzt gelten die
+  gespeicherten Preise weiter, solange sie die laufende Stunde abdecken; sonst
+  tragen `PREIS_RANG`, `PREIS_STUNDEN` und `PREIS_GUENSTIGSTE_STUNDE` den Wert
+  `-1`. Neu ist `EVCC_PREIS_OK`; die Baustein-Liste verknüpft es per UND.
+* Vor dem ersten gelungenen Abruf antwortet der Endpunkt mit HTTP 503 statt mit
+  Nullen. Danach bleibt es bei 200 mit `OK=0` und den letzten Werten.
+* `OK` geht auf 0, sobald die Werte älter als das Dreifache des Takts sind.
+* Zahlen ohne Aussage tragen `-1` statt 0. Ja/Nein-Zustände und Werte mit
+  negativem Wertebereich bleiben bei 0; dort entscheiden `OK` und
+  `BETRIEBSBEREIT`.
+* **Befehlsbremse:** Derselbe Wert innerhalb von 60 s wird nicht erneut
+  gesendet (`UNVERAENDERT=1`), ein anderer Wert frühestens nach 10 s (sonst
+  HTTP 429).
+* Umleitungen von EVCC werden nicht mehr verfolgt; ohne php-curl ging das
+  Passwort dabei unter PHP 7.4 an das Umleitungsziel.
+* **Ladeplan aus Loxone:** zwei Ausgänge `EVCC_SET_PLANSOC_ZIEL_LPn` (Ziel in %)
+  und `EVCC_SET_PLANSOC_STUNDEN_LPn` (Stunden ab jetzt). Der Plan geht hinaus,
+  sobald beide Werte da sind. Die bisherige Vorlage mit zwei Werten in einer
+  Adresse konnte Loxone nicht füllen; Ausgangsvorlage neu einlesen.
+* Ein Handlauf als root wird abgelehnt; der Aufruf lautet
+  `sudo -u loxberry php …/ev_abruf.php`.
+* Eine Konfiguration ohne Aktionstoken wird aus der Zweitschrift geheilt, statt
+  still ein neues Token zu würfeln. Ein neues Token meldet der Reiter
+  Einstellungen 24 Stunden lang.
+* Konfiguration und Zweitschrift sind auch während des Schreibens nie für
+  andere lesbar.
+
+**MQTT**
+
+* Ein Wert ohne Aussage geht einmal als `-` hinaus statt als erfundene 0.
+* Nach einem Neustart ohne EVCC gehen nur noch die sechs Themen des
+  Lebenszeichens hinaus, keine Zustände (bisher 109 Nachrichten mit Nullen).
+* Präfixwechsel, Abschalten, weniger Ladepunkte oder Fahrzeuge, Zurückspielen
+  und Deinstallation räumen die alten Themen ab, jeweils vom Broker bestätigt.
+  Die Deinstallation räumt alle je benutzten Präfixe ab.
+* `fehler_nr` ist nicht mehr zurückbehalten.
+* Das Lebenszeichen geht bei Änderung sofort, sonst höchstens alle 30 s
+  (bisher 52 Nachrichten je Cron-Lauf, jetzt 4). Zwischen den Nachrichten
+  eines Stoßes liegen 5 ms.
+
+**Oberfläche**
+
+* Nach jedem Knopf leitet die Seite um; F5 wiederholt nichts mehr.
+* Eingaben werden abgewiesen statt still gerundet oder beschnitten.
+* Die Prüfungen laufen nur im Reiter Test. Ein Seitenaufruf braucht 0,2 statt
+  10 s und fragt EVCC nicht mehr.
+* Kachelnamen in den Vorlagen sind höchstens 40 Zeichen lang; die englische
+  Oberfläche zeigt keine deutschen Bausteinnamen mehr.
+* „Protokoll leeren“ nur mit Haken.
+
+**Installation**
+
+* Eine Neuinstallation übernimmt Token und Passwort einer früheren
+  Installation nicht mehr (neu: `preinstall.sh`, Reste nach `.alt`).
+* Die Cron-Zeile schreibt Fehler nach `cron.err`, steigt als root zu loxberry
+  ab und schweigt während eines Updates.
+
 ## Neu in 0.9.33
 
 **Die Deinstallation hat die Zugangsdaten liegen lassen.** `uninstall` nahm
@@ -685,7 +753,7 @@ kommt. Einmal gegen die EVCC-Oberfläche halten.
 ### Nach dem Update prüfen
 
 ```bash
-php /opt/loxberry/bin/plugins/<ordner>/ev_abruf.php; echo "Rueckgabewert: $?"
+sudo -u loxberry php "$LBHOMEDIR/bin/plugins/<ordner>/ev_abruf.php"; echo "Rueckgabewert: $?"
 ```
 
 Danach im Reiter *Test* die erste Zeile ansehen — sie beantwortet die Frage,
@@ -707,7 +775,7 @@ hat**, und endet mit Rueckgabewert 1 statt stillschweigend.
 Nach dem Update einmal von Hand pruefen:
 
 ```bash
-php /opt/loxberry/bin/plugins/<ordner>/ev_abruf.php; echo "Rueckgabewert: $?"
+sudo -u loxberry php "$LBHOMEDIR/bin/plugins/<ordner>/ev_abruf.php"; echo "Rueckgabewert: $?"
 ```
 
 ## Was es tut

@@ -1,31 +1,78 @@
 #!/bin/bash
-# Laeuft als Benutzer loxberry, vor der Installation.
+# EVCC - preinstall. Laeuft als Benutzer loxberry.
+# Argumente wie der Installer sie uebergibt (plugininstall.pl, am Geraet
+# gelesen, Regeln/06): <ZUFALLSKENNUNG> <NAME> <FOLDER> <VERSION> <BASEFOLDER> <TEMPFOLDER>
 #
-# Argumente: <TEMPFOLDER> <NAME> <FOLDER> <VERSION> <BASEFOLDER>
-ARGV1=$1   # Temporaerordner
-ARGV5=$5   # LoxBerry-Basisordner
+# Neu in 0.9.34 (I1, Entscheidung 1 vom 29.09.2026), Bauart Bewaesserung
+# 0.9.35 / AudiConnect 0.9.22. Der Installer ruft dieses Skript bei JEDEM
+# Einbau auf, nach dem Aufraeumen der alten Fassung und VOR dem Kopieren von
+# Konfiguration, Cron-Datei und Oberflaeche (sbin/plugininstall.pl:
+# preupgrade :846, purge :874, preinstall :877).
+#
+# Eine Aktualisierung erkennt es allein an der Marke
+# data/plugins/<ordner>.upgrade_laeuft, die preupgrade.sh als Erstes anlegt
+# (kein Altersvergleich). Dann tut es nichts: die Zweitschrift und die
+# Upgrade-Sicherung braucht postupgrade.sh.
+#
+# Ohne Marke ist es eine NEUINSTALLATION. Liegengebliebene Zweitschriften
+# einer frueheren Installation (config/plugins/<ordner>.backup.evcc.json mit
+# EVCC-Passwort und Aktionstoken) und die Upgrade-Sicherung
+# (data/plugins/<ordner>.upgrade_sicherung) gehen nach <name>.alt, gemeldet
+# mit genau einer <WARNING>. Bis 0.9.33 zog die Selbstheilung der Bibliothek
+# die Zweitschrift beim ersten Takt oder Seitenaufruf, und der unangemeldete
+# Endpunkt nahm das alte Token an, bevor jemand die Oberflaeche oeffnete (in
+# WSL gemessen, Pruefbericht installer, B1). Die Bibliothek liest .alt nie;
+# die Deinstallation raeumt es ab.
+#
+# Der Schritt, der hier bis 0.9.33 die Zeilenenden mit dos2unix geradeziehen
+# sollte, ist entfallen (I4): er nahm $1 als Ordner, aber $1 ist die
+# Zufallskennung des Installers - er lief nie und schrieb in jedes
+# Installationsprotokoll eine falsche <WARNING> (Pruefbericht installer, B6).
+# Das Geradeziehen erledigt der Installer selbst (plugininstall.pl :1194).
+ARGV3=$3
+ARGV5=$5
+PFOLDER="${ARGV3:-evcc}"
+case "$PFOLDER" in
+    ''|*/*|*..*) echo "<WARNING> Unzulaessiger Ordnername '$PFOLDER' - nichts beiseitegelegt."; exit 0 ;;
+esac
 
-# Zeilenenden im ausgepackten Ordner geradeziehen. Bewusst mit gesetzter
-# Variablen und Leerpruefung: ein leeres $ARGV1 wuerde den Befehl auf das
-# gesamte Elternverzeichnis loslassen.
-# dos2unix steht in dpkg/apt und wird damit mitinstalliert. Trotzdem wird
-# es hier geprueft: bis 0.9.26 stand es NICHT in dpkg/apt, die Fehlerausgabe
-# ging nach /dev/null, und Zeile 14 meldete unbedingt <OK>. Eine Meldung, die
-# genau dann luegt, wenn sie gebraucht wird.
-if ! command -v dos2unix >/dev/null 2>&1; then
-    echo "<WARNING> dos2unix ist nicht vorhanden - die Zeilenenden wurden NICHT"
-    echo "<WARNING> geradegezogen. Das Plugin laeuft, wenn das Archiv sie schon"
-    echo "<WARNING> richtig mitbringt; im Zweifel: sudo apt install dos2unix"
-elif [ -n "$ARGV1" ] && [ -d "$ARGV1" ]; then
-    if find "$ARGV1" -type f \( -name '*.sh' -o -name '*.php' -o -name '*.ini' -o -name '*.cfg' \) \
-            -print0 | xargs -0 -r dos2unix -q; then
-        echo "<OK> Zeilenenden geprueft."
-    else
-        echo "<WARNING> dos2unix ist mit einem Fehler ausgestiegen - die"
-        echo "<WARNING> Zeilenenden sind moeglicherweise nicht geradegezogen."
+# Die Wurzel wird geprueft, nicht geglaubt - wie in den uebrigen Hakenskripten.
+ev_ist_loxberry() {
+    [ -n "$1" ] && [ -d "$1/config/plugins" ] && [ -d "$1/data/plugins" ] \
+        && [ -f "$1/config/system/general.json" ]
+}
+BASE=""
+for EV_KAND in "$ARGV5" "${LBHOMEDIR:-}"; do
+    if ev_ist_loxberry "$EV_KAND"; then
+        BASE="$EV_KAND"
+        break
     fi
-else
-    echo "<WARNING> Temporaerordner nicht gefunden - Zeilenenden nicht geprueft."
+done
+if [ -z "$BASE" ]; then
+    echo "<WARNING> Kein LoxBerry-Wurzelverzeichnis erkannt ('$ARGV5') - nichts beiseitegelegt."
+    exit 0
 fi
+[ -f "$BASE/data/plugins/$PFOLDER.upgrade_laeuft" ] && exit 0
 
+BEISEITE=""
+FEST=""
+for ZIEL in "$BASE/config/plugins/$PFOLDER".backup.evcc.json* \
+            "$BASE/config/plugins/$PFOLDER/evcc.backup.json" \
+            "$BASE/data/plugins/$PFOLDER".upgrade_sicherung*; do
+    [ -e "$ZIEL" ] || [ -L "$ZIEL" ] || continue
+    case "$ZIEL" in *.alt) continue ;; esac
+    rm -rf "${ZIEL:?}.alt" 2>/dev/null
+    if mv -f "$ZIEL" "$ZIEL.alt" 2>/dev/null; then
+        BEISEITE="$BEISEITE $(basename "$ZIEL").alt"
+        [ -f "$ZIEL.alt" ] && [ ! -L "$ZIEL.alt" ] && chmod 600 "$ZIEL.alt" 2>/dev/null
+    else
+        FEST="$FEST $ZIEL"
+    fi
+done
+if [ -n "$BEISEITE" ] || [ -n "$FEST" ]; then
+    T="<WARNING> Neuinstallation: EVCC-Passwort, Aktionstoken und Einstellungen einer frueheren Installation werden NICHT eingespielt."
+    [ -n "$BEISEITE" ] && T="$T Beiseitegelegt:$BEISEITE (die Deinstallation raeumt sie ab)."
+    [ -n "$FEST" ] && T="$T Nicht zu verschieben, bitte von Hand entfernen:$FEST"
+    echo "$T"
+fi
 exit 0

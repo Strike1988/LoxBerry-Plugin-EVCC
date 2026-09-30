@@ -83,7 +83,9 @@ fi
 # UDP-Eingang des Gateways, der nichts bestaetigt; ev_mqtt_leeren() fragt
 # deshalb vorher und nach jeder Runde den Broker (hoechstens drei Runden,
 # Bauart Beschattungswaechter 0.9.21). VOR dem Loeschen der Ordner, denn
-# Praefix und Port stehen in der Konfiguration.
+# Praefix und Port stehen in der Konfiguration. Seit 0.9.34 (M3) unter ALLEN
+# je benutzten Praefixen (data/plugins/<ordner>.mqtt_praefixe.json), nicht
+# nur unter dem eingestellten.
 #
 # 'timeout -k 5 60': ohne -k schickt timeout nach 60 s nur SIGTERM - ein
 # Programm, das es nicht annimmt, hielte die Deinstallation an, und die
@@ -122,16 +124,19 @@ fi
 # diesem Skript weg. ev_config() holte die Zweitschrift sonst bei einer
 # NEUinstallation stillschweigend zurueck.
 echo "<INFO> Entferne Konfiguration, Zweitschrift und Upgrade-Sicherung"
+# Seit 0.9.34 auch die .alt, die preinstall.sh bei einer Neuinstallation
+# beiseitelegt (Entscheidung 1), die Nebendateien mit PID (.neu.<pid>), die
+# Marke einer laufenden Aktualisierung und die Liste der je benutzten
+# MQTT-Praefixe (Schritt 1 hat sie eben gelesen).
 for verzeichnis in "$LBHOME/config/plugins/$PDIR" "$LBHOME/data/plugins/$PDIR" \
-                   "$LBHOME/data/plugins/$PDIR.upgrade_sicherung" \
-                   "$LBHOME/data/plugins/$PDIR.upgrade_sicherung.neu" \
-                   "$LBHOME/data/plugins/$PDIR.upgrade_sicherung.alt"; do
+                   "$LBHOME/data/plugins/$PDIR".upgrade_sicherung*; do
     if [ -d "$verzeichnis" ]; then
-        rm -rf "$verzeichnis" && echo "<OK> $verzeichnis entfernt."
+        rm -rf "${verzeichnis:?}" && echo "<OK> $verzeichnis entfernt."
     fi
 done
-for datei in "$LBHOME/config/plugins/$PDIR.backup.evcc.json" \
-             "$LBHOME/config/plugins/$PDIR.backup.evcc.json.neu"; do
+for datei in "$LBHOME/config/plugins/$PDIR".backup.evcc.json* \
+             "$LBHOME/data/plugins/$PDIR.upgrade_laeuft" \
+             "$LBHOME/data/plugins/$PDIR.mqtt_praefixe.json"; do
     if [ -f "$datei" ]; then
         rm -f "$datei" && echo "<OK> $datei entfernt."
     fi
@@ -140,8 +145,8 @@ rm -rf "/tmp/${PDIR}_upgrade" "/run/shm/${PDIR}" "/tmp/${PDIR}" 2>/dev/null
 
 # Gesagt wird, was WIRKLICH geschah - nicht, was vorhatte zu geschehen.
 EV_REST=""
-for datei in "$LBHOME/config/plugins/$PDIR/evcc.json" "$LBHOME/config/plugins/$PDIR.backup.evcc.json" \
-             "$LBHOME/data/plugins/$PDIR.upgrade_sicherung/evcc.json"; do
+for datei in "$LBHOME/config/plugins/$PDIR/evcc.json" "$LBHOME/config/plugins/$PDIR".backup.evcc.json* \
+             "$LBHOME/data/plugins/$PDIR".upgrade_sicherung*/evcc.json; do
     [ -e "$datei" ] && EV_REST="$EV_REST $datei"
 done
 if [ -z "$EV_REST" ]; then

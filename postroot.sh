@@ -156,10 +156,15 @@ UPDATE
 
 sudo_regel_anlegen() {
     update_skript_anlegen
-    # Der Benutzer loxberry muss den Dienst aus der Oberflaeche steuern
-    # koennen, ohne Passwort - aber nur genau diesen einen Dienst und nur
-    # diese vier Unterbefehle. Ein pauschales NOPASSWD:ALL waere hier eine
-    # Hintertuer.
+    # Der Benutzer loxberry soll den Dienst aus der Oberflaeche steuern
+    # koennen, ohne Passwort. Diese Regel BEGRENZT dabei nichts (I5,
+    # Entscheidung 2 vom 29.09.2026): laut /etc/sudoers.d/lbdefaults darf
+    # loxberry /bin/systemctl ohnehin beliebig und ohne Kennwort aufrufen,
+    # dazu apt-get und dpkg - loxberry ist auf jedem LoxBerry faktisch root.
+    # Die Zeilen fuer systemctl bleiben, damit die Knoepfe auch dort wirken,
+    # wo diese Vorgabe fehlt; zusaetzliche Wirkung hat nur die Zeile fuer
+    # /usr/local/sbin/loxberry-evcc-update. Namen und Unterbefehle prueft das
+    # Plugin selbst vor dem Aufruf (ev_dienst(): nur start, stop, restart).
     cat > /etc/sudoers.d/loxberry-evcc <<'SUDO'
 loxberry ALL=(root) NOPASSWD: /bin/systemctl start evcc, /bin/systemctl stop evcc, /bin/systemctl restart evcc, /bin/systemctl status evcc
 loxberry ALL=(root) NOPASSWD: /usr/bin/systemctl start evcc, /usr/bin/systemctl stop evcc, /usr/bin/systemctl restart evcc, /usr/bin/systemctl status evcc

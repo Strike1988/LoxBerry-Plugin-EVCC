@@ -96,6 +96,20 @@ if ($ev_lib === '') {
 }
 require_once $ev_lib;
 
+/**
+ * Noch gar keine Daten? Dann HTTP 503 mit Grund (C5, seit 0.9.34; Regeln/07
+ * "Das gilt auch vor dem ersten Abruf"). Bis 0.9.33 antwortete der Endpunkt
+ * vor dem ersten gelungenen Abruf mit 200 und lauter Nullen, die in Loxone
+ * als Messwerte ankamen (Pruefbericht code, Befund 5). Mit einem alten Stand
+ * bleibt es bei 200, OK=0 und den alten Werten (Entscheidung 8).
+ */
+function ev_ohne_daten_503($st)
+{
+    if (!empty($st['stand'])) { return; }
+    $nr = isset($st['fehlernr']) ? (int) $st['fehlernr'] : 9;
+    ev_ende(503, 'EVCC;OK=0;GRUND=NOCH_KEINE_DATEN;FEHLER_NR=' . $nr);
+}
+
 /** Die Adresse des Anrufers, auf die zulaessigen Zeichen beschraenkt. */
 function ev_anrufer()
 {
@@ -215,7 +229,11 @@ if (!in_array($aktion, array_merge($lesend, $schreibend), true)) {
  * Zwischenspeicher. Der Abrufdienst fuellt ihn jede Taktlaenge; zweieinhalb
  * Takte Nachsicht heisst: im Normalbetrieb kein einziger eigener Abruf, und
  * bei stehendem Dienst trotzdem nach kurzer Zeit ein frischer Versuch. */
-$ev_hoechstalter = max(30, (int) round($cfg['takt'] * 2.5));
+/* Seit 0.9.34 (C6, Entscheidung 4): OK=0 ab 3 x Takt. Die Nachsicht des
+ * Endpunkts liegt deshalb darunter - bei 2 x Takt (mindestens 10 s) fragt er
+ * selbst nach. Bis 0.9.33 stand hier max(30, 2,5 x Takt): bei Takt 5 lieferte
+ * er einen 29 s alten Stand als OK=1 (Pruefbericht code, Befund 6). */
+$ev_hoechstalter = max(10, 2 * (int) $cfg['takt']);
 
 /* ---------------- Lesende Aktionen ---------------- */
 
@@ -291,16 +309,25 @@ if ($aktion === 'befehle') {
 if ($aktion === 'wert') {
     $feld = (isset($_GET['feld']) && is_string($_GET['feld']))
             ? preg_replace('/[^a-z0-9_]/', '', (string) $_GET['feld']) : '';
-    $werte = ev_werte(ev_state(false, $ev_hoechstalter));
+    $st = ev_state(false, $ev_hoechstalter);
+    ev_ohne_daten_503($st);
+    $werte = ev_werte($st);
     if ($feld === '' || !isset($werte[$feld])) {
         ev_ende(400, '-');
     }
-    echo $werte[$feld]['wert'] . "\n";
+    $ev_felder = ev_felder();
+    $ev_w = $werte[$feld]['wert'];
+    if (!empty($werte[$feld]['ohne']) && isset($ev_felder[$feld]) && ev_ohne_minus1($feld, $ev_felder[$feld])) {
+        $ev_w = -1;       // keine Aussage (C5, Nr. 5/8)
+    }
+    echo $ev_w . "\n";
     exit;
 }
 
 if ($aktion === 'status') {
-    echo ev_zeile(ev_werte(ev_state(false, $ev_hoechstalter)));
+    $st = ev_state(false, $ev_hoechstalter);
+    ev_ohne_daten_503($st);
+    echo ev_zeile(ev_werte($st));
     exit;
 }
 
@@ -314,8 +341,19 @@ if (empty($cfg['steuerung_ein'])) {
 
 $b = $befehle[$aktion];
 
-/* Ladepunkt pruefen - aber nur, wo einer gebraucht wird. */
-$lp = isset($_GET['lp']) ? (int) $_GET['lp'] : 1;
+/* Ladepunkt pruefen - aber nur, wo einer gebraucht wird.
+ *
+ * Streng seit 0.9.34 (C9): lp=1abc wurde bis 0.9.33 per (int) zu Ladepunkt 1
+ * und der Befehl ging hinaus (Pruefbericht code, Befund 9). Jetzt nur eine
+ * Zahl aus Ziffern; ohne Angabe bleibt es bei Ladepunkt 1. */
+$lp = 1;
+if (isset($_GET['lp'])) {
+    $ev_lp_roh = is_string($_GET['lp']) ? (string) $_GET['lp'] : '';
+    if (!preg_match('/^[0-9]{1,2}\z/', $ev_lp_roh)) {
+        ev_ende(400, 'EVCC;OK=0;GRUND=LADEPUNKT_UNGUELTIG;ERLAUBT=1..' . EV_LADEPUNKTE);
+    }
+    $lp = (int) $ev_lp_roh;
+}
 if ($b['ebene'] === 'lp' && ($lp < 1 || $lp > EV_LADEPUNKTE)) {
     ev_ende(400, 'EVCC;OK=0;GRUND=LADEPUNKT_UNGUELTIG;ERLAUBT=1..' . EV_LADEPUNKTE);
 }
@@ -336,6 +374,7 @@ if (!$ok) {
  * bilden, deshalb wird sie als VORLAUF IN STUNDEN uebergeben und hier
  * gerechnet - das ist die Zahl, die ein Loxone-Baustein ohnehin hat. */
 $zeit = '';
+$std = '';
 if ($b['pruef'] === 'plan') {
         $std = (isset($_GET['stunden']) && is_string($_GET['stunden']))
            ? str_replace(',', '.', (string) $_GET['stunden']) : '';
@@ -349,10 +388,81 @@ if ($b['pruef'] === 'plan') {
     $zeit = gmdate('Y-m-d\TH:i:s\Z', time() + (int) round($std * 3600));
 }
 
-$pfad = str_replace(
-    array('%LP%', '%WERT%', '%ZEIT%'),
-    array((string) $lp, rawurlencode($klar), rawurlencode($zeit)),
-    $b['pfad']);
+/* ---------------- Befehlsbremse (C3, seit 0.9.34) ----------------
+ *
+ * Regeln/03: jeder Ausloeser, den eine fremde Anlage bedient, braucht eine
+ * Bremse im Plugin. Bis 0.9.33 schaltete ein flatternder Loxone-Ausgang die
+ * Phasenumschaltung im Takt der Anfragen - 20 POST an EVCC in unter einer
+ * Sekunde (Pruefbericht code, Befund 3). Jetzt je Befehl und Ladepunkt:
+ *   - derselbe Wert innerhalb von 60 s geht nicht erneut hinaus
+ *     (200, UNVERAENDERT=1);
+ *   - ein anderer Wert hoechstens alle 10 s (429, GRUND=BREMSE, WARTEN_S);
+ *   - ist die Merkerdatei nicht zu oeffnen, faellt die Bremse geschlossen
+ *     aus: 503 und eine Protokollzeile.
+ * Die Sperre bleibt bis zum Ende des Befehls gehalten; zwei gleichzeitige
+ * Befehle laufen damit nacheinander, nicht ueber einander. */
+$ev_bremse = ev_tmpdir() . '/befehlsbremse.json';
+$ev_bfh = @fopen($ev_bremse, 'c+');
+if ($ev_bfh === false || !@flock($ev_bfh, LOCK_EX)) {
+    ev_log_wenn_neu('bremse', 'Die Merkerdatei der Befehlsbremse (' . $ev_bremse . ') laesst sich '
+        . 'nicht oeffnen - schreibende Befehle werden mit 503 abgewiesen, bis das behoben ist. '
+        . 'Pruefen: Platz und Eigentuemer (loxberry).');
+    ev_ende(503, 'EVCC;OK=0;AKTION=' . $aktion . ';GRUND=BREMSE_MERKER');
+}
+$ev_bm = json_decode((string) stream_get_contents($ev_bfh), true);
+if (!is_array($ev_bm)) { $ev_bm = array(); }
+$ev_bschl = $aktion . '|' . ($b['ebene'] === 'lp' ? $lp : 0);
+$ev_bwert = $klar . ($b['pruef'] === 'plan' ? '|' . $std : '');
+if (isset($ev_bm[$ev_bschl]) && is_array($ev_bm[$ev_bschl])) {
+    $ev_seit = time() - (int) $ev_bm[$ev_bschl]['t'];
+    if ((string) $ev_bm[$ev_bschl]['w'] === $ev_bwert && $ev_seit < 60) {
+        ev_ende(200, 'EVCC;OK=1;AKTION=' . $aktion . ';WERT=' . $klar . ';UNVERAENDERT=1');
+    }
+    if ($ev_seit < 10) {
+        ev_ende(429, 'EVCC;OK=0;AKTION=' . $aktion . ';GRUND=BREMSE;WARTEN_S=' . (10 - max(0, $ev_seit)));
+    }
+}
+
+/* ---------------- Ladeplan aus zwei Ausgaengen (C11, seit 0.9.34) ----------------
+ *
+ * In Loxone ist <v.N> derselbe Analogwert mit N Nachkommastellen; der alte
+ * Befehl 'plansoc' mit wert=<v.0>&stunden=<v.1> haette das Ziel 80 % in 80 h
+ * gesetzt (Pruefbericht oberflaeche, Befund 13). Ziel und Vorlauf kommen jetzt
+ * je aus einem eigenen Ausgang; das Plugin merkt sich beide je Ladepunkt und
+ * sendet den Plan, sobald beide bekannt sind - mit dem Vorlauf ab JETZT. */
+if ($b['pruef'] === 'planziel' || $b['pruef'] === 'planstunden') {
+    $ev_plan = ev_tmpdir() . '/ladeplan.json';
+    $ev_pfh = @fopen($ev_plan, 'c+');
+    if ($ev_pfh === false || !@flock($ev_pfh, LOCK_EX)) {
+        ev_log_wenn_neu('ladeplan', 'Die Merkerdatei des Ladeplans (' . $ev_plan . ') laesst sich '
+            . 'nicht oeffnen - der Ladeplan wird nicht gesetzt.');
+        ev_ende(503, 'EVCC;OK=0;AKTION=' . $aktion . ';GRUND=PLAN_MERKER');
+    }
+    $ev_pm = json_decode((string) stream_get_contents($ev_pfh), true);
+    if (!is_array($ev_pm)) { $ev_pm = array(); }
+    $ev_teil = ($b['pruef'] === 'planziel') ? 'ziel' : 'stunden';
+    $ev_pm[(string) $lp][$ev_teil] = $klar;
+    ftruncate($ev_pfh, 0);
+    rewind($ev_pfh);
+    fwrite($ev_pfh, (string) json_encode($ev_pm));
+    fflush($ev_pfh);
+    flock($ev_pfh, LOCK_UN);
+    fclose($ev_pfh);
+    $ev_z = isset($ev_pm[(string) $lp]['ziel']) ? (string) $ev_pm[(string) $lp]['ziel'] : '';
+    $ev_s = isset($ev_pm[(string) $lp]['stunden']) ? (string) $ev_pm[(string) $lp]['stunden'] : '';
+    if ($ev_z === '' || $ev_s === '') {
+        ev_ende(200, 'EVCC;OK=1;AKTION=' . $aktion . ';WERT=' . $klar . ';GEMERKT=1;FEHLT='
+            . ($ev_z === '' ? 'plansoc_ziel' : 'plansoc_stunden'));
+    }
+    $zeit = gmdate('Y-m-d\\TH:i:s\\Z', time() + (int) round((float) $ev_s * 3600));
+    $pfad = str_replace(array('%LP%', '%WERT%', '%ZEIT%'),
+        array((string) $lp, rawurlencode($ev_z), rawurlencode($zeit)), $b['pfad']);
+} else {
+    $pfad = str_replace(
+        array('%LP%', '%WERT%', '%ZEIT%'),
+        array((string) $lp, rawurlencode($klar), rawurlencode($zeit)),
+        $b['pfad']);
+}
 
 $a = ev_http($pfad, $b['methode']);
 if (!$a['ok']) {
@@ -370,6 +480,16 @@ if (!$a['ok']) {
 }
 ev_log('Befehl ' . $aktion . ' (' . $klar . ') an '
      . ($b['ebene'] === 'lp' ? 'Ladepunkt ' . $lp : 'die Anlage') . ' gesendet');
+/* Die Bremse merkt sich den GESENDETEN Wert (C3). Scheitert das Schreiben,
+ * wirkt der Befehl trotzdem - aber das steht im Protokoll. */
+$ev_bm[$ev_bschl] = array('w' => $ev_bwert, 't' => time());
+if (!(ftruncate($ev_bfh, 0) && rewind($ev_bfh)
+      && fwrite($ev_bfh, (string) json_encode($ev_bm)) !== false && fflush($ev_bfh))) {
+    ev_log_wenn_neu('bremse', 'Die Merkerdatei der Befehlsbremse (' . $ev_bremse . ') liess sich '
+        . 'nicht schreiben - die Bremse erkennt den letzten Befehl nicht.');
+}
+flock($ev_bfh, LOCK_UN);
+fclose($ev_bfh);
 // Der zwischengespeicherte Zustand ist jetzt veraltet.
 @unlink(ev_tmpdir() . '/state.json');
 /* Wurde die Eingabe gerundet? Dann wird es GESAGT.
@@ -386,10 +506,16 @@ ev_log('Befehl ' . $aktion . ' (' . $klar . ') an '
  * bei 'modus' und 'schalter' ist $klar eine Uebersetzung ('3' -> 'pv'), da
  * waere ein GERUNDET= irrefuehrend. */
 $gerundet = '';
-if (in_array($b['pruef'], array('ganz', 'plan', 'liste'), true)
+if (in_array($b['pruef'], array('ganz', 'plan', 'liste', 'planziel'), true)
     && is_numeric(str_replace(',', '.', $wert))
     && (string) $klar !== (string) $wert) {
     $gerundet = ';GERUNDET=' . str_replace(';', ',', $wert);
+}
+if ($b['pruef'] === 'planziel' || $b['pruef'] === 'planstunden') {
+    // Der Ladeplan nennt beide Teile, aus denen er entstand (C11).
+    printf("EVCC;OK=1;AKTION=%s;WERT=%s%s;ZIEL=%s;STUNDEN=%s;ZEIT=%s\n", $aktion, $klar,
+           $gerundet, $ev_z, $ev_s, $zeit);
+    exit;
 }
 printf("EVCC;OK=1;AKTION=%s;WERT=%s%s%s\n", $aktion, $klar,
        $gerundet, $zeit !== '' ? ';ZEIT=' . $zeit : '');

@@ -64,6 +64,24 @@ if [ -z "$BASE" ]; then
 fi
 PDIR="${ARGV3:-evcc}"
 
+# DIE MARKE "AKTUALISIERUNG LAEUFT" - ALS ERSTES (I1, Entscheidung 1 vom
+# 29.09.2026). preinstall.sh legt ohne sie liegengebliebene Zweitschriften
+# nach .alt, postupgrade.sh spielt nur mit ihr zurueck und raeumt sie ueber
+# einen trap ab, die Bibliothek legt waehrend der Luecke kein neues Token an,
+# und der Minutentakt ruht. Kein Altersvergleich. Lag sie schon (ein frueheres
+# Update brach ab), gilt sie weiter (Entscheidung 8, Frage 17). Bricht DIESES
+# Skript mit 2 ab, faellt die Marke wieder weg, wenn es sie selbst angelegt
+# hat - die alte Fassung bleibt dann unveraendert installiert.
+EV_MARKE="$BASE/data/plugins/$PDIR.upgrade_laeuft"
+EV_MARKE_VORHER=0
+[ -e "$EV_MARKE" ] && EV_MARKE_VORHER=1
+if ! touch "$EV_MARKE" 2>/dev/null; then
+    echo "<FAIL> Die Marke $EV_MARKE liess sich nicht anlegen - Platz und Rechte unter"
+    echo "<FAIL> $BASE/data/plugins pruefen. Das Update wird abgebrochen."
+    exit 2
+fi
+trap 'ev_rc=$?; if [ "$ev_rc" = "2" ] && [ "$EV_MARKE_VORHER" = "0" ]; then rm -f "$EV_MARKE"; fi' EXIT
+
 # Die Sicherung liegt BEWUSST NICHT unter /tmp.
 #
 # Auf dem LoxBerry ist /tmp eine Ramdisk. Zwischen preupgrade und postupgrade
@@ -141,12 +159,27 @@ if [ -d "$BASE/config/plugins/$PDIR" ] \
 else
     rm -rf "$NEU" 2>/dev/null
     echo "<INFO> Keine Konfiguration vorhanden - es gibt nichts zu sichern."
-    # Eine vorhandene Sicherung bleibt: nach einem abgebrochenen Update ist
-    # config/plugins/<ordner>/ schon abgeraeumt, und die Sicherung des ersten
-    # Laufs ist die einzige Abschrift.
+    # Eine vorhandene Sicherung stammt aus einem FRUEHEREN Vorgang (I1, B2,
+    # Entscheidung 1: "preupgrade.sh raeumt einen alten Bestand weg"). Bis
+    # 0.9.33 blieb sie liegen, und postupgrade.sh spielte sie ein - EVCC-
+    # Passwort und Token einer frueheren Installation (in WSL gemessen,
+    # Pruefbericht installer, B2). Jetzt geht sie nach .alt. Ausnahme: lag die
+    # Marke schon, bevor dieses Skript lief, ist ein Update abgebrochen, und
+    # die Sicherung ist dessen einzige Abschrift - dann bleibt sie.
     if [ -d "$SICHER" ]; then
-        echo "<INFO> Die Sicherung unter $SICHER bleibt liegen; sie stammt aus einem"
-        echo "<INFO> frueheren Lauf und ist unter Umstaenden die einzige Abschrift."
+        if [ "$EV_MARKE_VORHER" = "1" ]; then
+            echo "<INFO> Die Sicherung unter $SICHER bleibt liegen: die Marke eines abgebrochenen"
+            echo "<INFO> Updates lag schon, und die Sicherung ist dessen einzige Abschrift."
+        else
+            rm -rf "${SICHER:?}.alt" 2>/dev/null
+            if mv "$SICHER" "$SICHER.alt" 2>/dev/null; then
+                echo "<WARNING> Eine Upgrade-Sicherung aus einem frueheren Vorgang lag noch da. Sie wird NICHT eingespielt und liegt jetzt unter $SICHER.alt (die Deinstallation raeumt sie ab)."
+            else
+                echo "<FAIL> Eine Upgrade-Sicherung aus einem frueheren Vorgang ($SICHER) liess sich nicht"
+                echo "<FAIL> beiseitelegen und wuerde eingespielt. Das Update wird abgebrochen."
+                exit 2
+            fi
+        fi
     fi
 fi
 exit 0
