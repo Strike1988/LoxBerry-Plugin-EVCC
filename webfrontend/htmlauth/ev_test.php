@@ -435,6 +435,43 @@ function ev_pruefungen()
     $z[] = ev_pruefzeile(-1, ev_t('TEST.F_STEUERUNG'),
         !empty($cfg['steuerung_ein']) ? ev_t('TEST.A_STEUERUNG_EIN') : ev_t('TEST.A_STEUERUNG_AUS'));
 
+    /* ---- Schreiber-Wache (Energie-1 C1, Entscheidung Nr. 25) ----
+     * Ueber eine leere Menge wird nicht geurteilt (Klasse 8): kein Befehl im
+     * Fenster ist ein Hinweis, kein Haken. Ein Schreiber ist ein Haken, mehrere sind
+     * ein Hinweis (die Wache meldet, sie urteilt nicht), ein unlesbarer Merker ist ein
+     * Kreuz. Die Tabelle der Schreiber steht unter der Selbstpruefung. */
+    $ev_ww = ev_wache_einstellungen($cfg);
+    if ($ev_ww['wache_ein'] !== 1) {
+        $z[] = ev_pruefzeile(-1, ev_t('TEST.F_WACHE'), ev_t('TEST.A_WACHE_AUS'));
+    } else {
+        list($ev_wzs, $ev_wls) = ev_wache_lesen();
+        $ev_wim = array();
+        foreach ($ev_wls as $ev_wx) {
+            if (abs(time() - $ev_wx['zuletzt']) < 60 * $ev_ww['wache_fenster_min']) { $ev_wim[] = $ev_wx; }
+        }
+        if ($ev_wzs === 'merker') {
+            $z[] = ev_pruefzeile(0, ev_t('TEST.F_WACHE'), sprintf(ev_t('TEST.A_WACHE_MERKER'), ev_e(ev_wache_datei())));
+        } elseif (!$ev_wim) {
+            $z[] = ev_pruefzeile(-1, ev_t('TEST.F_WACHE'), sprintf(ev_t('TEST.A_WACHE_LEER'), $ev_ww['wache_fenster_min']));
+        } elseif (count($ev_wim) === 1) {
+            $z[] = ev_pruefzeile(1, ev_t('TEST.F_WACHE'),
+                sprintf(ev_t('TEST.A_WACHE_EINER'), ev_e(ev_wache_name($ev_wim[0], ev_t('TEST.W_OHNE_KENNUNG'))), $ev_ww['wache_fenster_min']));
+        } else {
+            $ev_wn = array();
+            foreach ($ev_wim as $ev_wx) { $ev_wn[] = ev_wache_name($ev_wx, ev_t('TEST.W_OHNE_KENNUNG')); }
+            $z[] = ev_pruefzeile(-1, ev_t('TEST.F_WACHE'),
+                sprintf(ev_t('TEST.A_WACHE_MEHRERE'), count($ev_wim), $ev_ww['wache_fenster_min'], ev_e(implode(', ', $ev_wn))));
+        }
+    }
+    if ($ev_ww['wache_sperren_ein'] !== 1) {
+        $z[] = ev_pruefzeile(-1, ev_t('TEST.F_WACHE_SPERRE'), ev_t('TEST.A_WACHE_SPERRE_AUS'));
+    } else {
+        list(, , $ev_wsf) = ev_wache_sperre_urteil($ev_ww, '', '');
+        $z[] = ($ev_wsf !== '')
+            ? ev_pruefzeile(0, ev_t('TEST.F_WACHE_SPERRE'), ev_t('TEST.A_WACHE_SPERRE_LISTE'))
+            : ev_pruefzeile(1, ev_t('TEST.F_WACHE_SPERRE'), sprintf(ev_t('TEST.A_WACHE_SPERRE_AN'), ev_e($ev_ww['wache_erlaubt'])));
+    }
+
     /* ---- Zweitschrift und beschaedigte Konfiguration ---- */
     $z[] = ev_pruefzeile(is_file($p['sicherung']) ? 1 : -1, ev_t('TEST.F_SICHERUNG'),
         is_file($p['sicherung'])

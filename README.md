@@ -9,6 +9,28 @@ Weg nach Loxone: EVCC rechnet in Watt und veröffentlicht unter eigenen Namen,
 der Energiemanager will Kilowatt an vier bestimmten Anschlüssen. Dieses Plugin
 ist der Übersetzer dazwischen.
 
+## Neu in 0.9.37
+
+Energie-1 Teile C1 und C6 (Verbesserungsliste `Pruefung-Durchgang-2026-09-29/VERBESSERUNGEN_OFFEN.md`, Entscheidung 25).
+Gemessen an einer EVCC-Attrappe unter PHP 7.4 und 8.5; nicht an einem echten Ladepunkt.
+
+* **Schreiber-Wache an den schaltenden Aufrufen:** Befehle dürfen eine Kennung
+  tragen (`&von=<kennung>`, 1–32 Zeichen; ungültig ergibt 400 `GRUND=VON`). Kommen
+  innerhalb von 15 Minuten (einstellbar) Befehle von mehr als einem Schreiber,
+  meldet das Plugin es im Protokoll, im Reiter Test („Schreiber der letzten
+  24 Stunden“) und in der Antwort (`;SCHREIBER=n`); abgewiesen wird dabei nichts.
+  Eine LoxBerry-Meldung ist zuschaltbar (ab Werk aus).
+* **Fremde Schreiber abweisen** (ab Werk aus): 409 `GRUND=FREMDSCHREIBER`, es geht
+  nichts an EVCC. Rücknahmen (`batteriemodus=normal`, `planaus`, `netzladenaus`)
+  gehen immer durch. Bremse und Gleichwert-Unterdrückung bleiben unverändert.
+* Die Loxone-Vorlage setzt `&von=loxone`; in einer bestehenden Einbindung genügt
+  es, `&von=loxone` an die Befehle anzuhängen.
+* Neuer Abschnitt „EVCC neben Hausspeichern“ in Hilfe und README:
+  `residualleistung` und `batterieboost` passend zur Vorrangkette
+  Hausspeicher → Auto. Erst nötig, wenn EVCC einen Ladepunkt steuert.
+* Hinweis: Eine mit dieser Fassung erstellte Sicherung lässt sich in 0.9.36 und
+  älter nicht zurückspielen (unbekannte Felder).
+
 ## Neu in 0.9.36
 
 Verbesserungen aus dem Durchgang vom 30.09.2026 (Verbesserungsliste
@@ -878,6 +900,58 @@ halber Ladeplan antwortet deshalb mit `GEMERKT=0`). Nur `probe=1` gilt; ein
 anderer Wert und `probe=1` an einer lesenden Aktion werden mit HTTP 400
 abgewiesen. Beispiel:
 `/plugins/<ordner>/index.php?token=<TOKEN>&aktion=modus&lp=1&wert=pv&probe=1`
+
+**Schreiber-Wache:** Jeder schaltende Befehl darf `&von=<kennung>` tragen
+(1 bis 32 Zeichen aus Buchstaben, Ziffern, `_` und `-`); die Loxone-Vorlage setzt
+`von=loxone`. Der Endpunkt merkt sich je Befehl Kennung und Absenderadresse.
+Eine ungültige Kennung wird mit HTTP 400 `GRUND=VON` abgewiesen, eine Adresse
+ohne `von` geht immer und erscheint als „ohne Kennung“.
+
+* **Melden (ab Werk an):** Schicken innerhalb des Zeitfensters (ab Werk 15 min,
+  einstellbar 1–120) mehrere Schreiber Befehle, steht das gebremst im Protokoll,
+  im Reiter *Test* (Tabelle „Schreiber der letzten 24 Stunden“) und in jeder
+  weiteren Antwort als `;SCHREIBER=n`. Abgewiesen wird nichts. Auf Wunsch kommt
+  eine LoxBerry-Meldung dazu, sobald neue Schreiber hinzukommen (ab Werk aus).
+* **Fremde Schreiber abweisen (ab Werk aus):** Befehle eines Schreibers, der nicht
+  in der Liste der erlaubten Schreiber steht, bekommen HTTP 409
+  `GRUND=FREMDSCHREIBER`, und an EVCC geht nichts. Die Liste nennt je Eintrag eine
+  Kennung, eine Adresse oder Kennung@Adresse. Rücknahmen (Batteriemodus `normal`,
+  `planaus`, `netzladenaus`) werden nie abgewiesen. Erst einschalten, wenn der
+  Reiter *Test* eine Woche lang nur die erwarteten Schreiber zeigt.
+* Lässt sich der Merker nicht schreiben, geht der Befehl trotzdem hinaus; die
+  Antwort trägt dann `;WACHE=MERKER`. Der Trockenlauf merkt sich nichts, prüft
+  die Sperre aber wie echt. Die Befehlsbremse bleibt, wie sie war. Ein neues
+  MQTT-Thema gibt es nicht.
+* Eine ältere Vorlage ohne `von=loxone` arbeitet weiter. Es genügt, an die
+  bestehenden Befehle `&von=loxone` anzuhängen; ein zweiter Import legte die
+  Bausteine doppelt an.
+
+## EVCC neben Hausspeichern
+
+Führt Loxone die Hausspeicher und gilt der Vorrang „Hausspeicher vor Auto“,
+bekommt EVCC nur den Rest. Das Plugin entscheidet dabei nichts; es reicht die
+Befehle von Loxone weiter. Solange EVCC keinen Ladepunkt führt, ist nichts davon
+nötig.
+
+* **`residualleistung`** setzt Loxone auf die Leistung in Watt, die die
+  vorrangigen Speicher gerade noch aufnehmen können (etwa Ladereserve der ersten
+  Batterie plus Restaufnahme der zweiten). Einen positiven Wert lässt EVCC laut
+  seiner Dokumentation als Reserve stehen und lädt nur mit dem, was darüber hinaus
+  eingespeist wird.
+* **Zwangsentladung eines Hausspeichers** (etwa in einer teuren Stunde): Die
+  dabei entstehende Einspeisung hielte EVCC für PV-Überschuss und lüde das Auto aus
+  dem Speicher. Deshalb kommt die Entladeleistung in dieser Zeit mit auf
+  `residualleistung`.
+* **`batterieboost`** bleibt aus (0). Eingeschaltet entlädt EVCC den Hausspeicher
+  absichtlich ins Auto, und das ist genau der Fluss, den der Vorrang ausschließt.
+* **`entladeregelung`** wirkt nur auf einen Speicher, den EVCC selbst kennt und
+  steuert. Ein Speicher, den Loxone oder ein anderes Plugin führt, ist davon nicht
+  erfasst.
+* Die Befehlsbremse lässt einen geänderten Wert höchstens alle 10 Sekunden durch
+  (sonst HTTP 429). Loxone sendet die Residualleistung deshalb gestuft (etwa auf
+  100 W gerundet) und nur bei Änderung.
+* Ob EVCC so regelt, wie es soll, zeigt die EVCC-Oberfläche (Reserve und
+  Ladeleistung am Ladepunkt).
 
 ## Laden nach Strompreis
 

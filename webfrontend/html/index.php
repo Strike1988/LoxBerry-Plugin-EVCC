@@ -29,6 +29,16 @@
  *               mit PROBE=1, aber nichts an EVCC senden und keinen Merker
  *               (Bremse, Ladeplan) anlegen oder schreiben
  *
+ * Schreiber-Wache (Energie-1 C1, Entscheidung Nr. 25):
+ *   von=<kennung>  an einem schreibenden Befehl, optional (die Vorlage setzt
+ *               von=loxone); gemerkt wird Kennung@Absender. Eine ungueltige
+ *               Kennung: HTTP 400 GRUND=VON. Mehr als ein Schreiber im Fenster
+ *               (ab Werk 15 min): Protokoll, Reiter Test, Antwort ;SCHREIBER=n -
+ *               abgewiesen wird nichts. Nur mit "Fremde Schreiber abweisen" (ab
+ *               Werk aus) bekommt ein nicht erlaubter Schreiber HTTP 409
+ *               GRUND=FREMDSCHREIBER, und nichts geht an EVCC; Ruecknahmen nie.
+ *               Merker nicht nutzbar: der Befehl geht trotzdem, ;WACHE=MERKER.
+ *
  * Der Datenabruf gehoert NICHT hierher - der laeuft in bin/ev_abruf.php.
  * Dieser Endpunkt liest den zwischengespeicherten Zustand und reicht
  * Schaltbefehle weiter.
@@ -136,6 +146,12 @@ function ev_ende($code, $text)
     // Statuszeile - auch die Liste der erlaubten Aktionen, die dadurch in
     // einer Zeile steht statt in zweien. Lesbar bleibt sie.
     $text = str_replace(array("\r\n", "\r", "\n"), ' ', (string) $text);
+    /* Schreiber-Wache (Energie-1 C1): jede Antwort NACH der Wache traegt ihren
+     * Zusatz (;SCHREIBER=n, ;WACHE=MERKER) - auch UNVERAENDERT, 429 und 502. Mit
+     * einem Schreiber ist er leer, die Zeile also wie bisher. */
+    if (isset($GLOBALS['ev_wz']) && is_string($GLOBALS['ev_wz']) && $GLOBALS['ev_wz'] !== '') {
+        $text = rtrim($text) . $GLOBALS['ev_wz'];
+    }
     /* Ein Trockenlauf (EVCC-b1) sagt es in JEDER Antwort, auch in einer
      * Abweisung - gleich hinter OK, damit es nicht hinter einem Grund steht. */
     if (!empty($GLOBALS['ev_probe'])) {
@@ -160,6 +176,44 @@ function ev_ende($code, $text)
     }
     echo rtrim($text) . "\n";
     exit;
+}
+
+/**
+ * Schreiber-Wache (Energie-1 C1, Entscheidung Nr. 25; Kopf der Funktionen in
+ * ev_lib.php): merken und melden, und nur mit "Fremde Schreiber abweisen" einen
+ * Befehl eines nicht erlaubten Schreibers mit 409 abweisen, bevor die Bremse ihn
+ * sieht und bevor etwas an EVCC geht. Ruecknahmen nie (ev_wache_ruecknahme()).
+ * Der Trockenlauf merkt sich nichts, prueft die Sperre aber wie echt.
+ * Rueckgabe: Zusatz fuer die Antwortzeile - ;SCHREIBER=n ab zwei Schreibern im
+ * Fenster, ;WACHE=MERKER, wenn das Merken nicht ging (der Befehl geht trotzdem).
+ */
+function ev_wache_anwenden($aktion, $klar, $von, $probe)
+{
+    $w = ev_wache_einstellungen(ev_config(false));
+    $ip = ev_wache_absender();
+    list($aktiv, $erlaubt, $fehler) = ev_wache_sperre_urteil($w, $von, $ip);
+    if ($fehler !== '') {
+        ev_log_wenn_neu('wache_liste', 'Fremde Schreiber abweisen ist eingeschaltet, aber die Liste der '
+            . 'erlaubten Schreiber ist leer oder unbrauchbar - die Sperre wirkt NICHT, bis die Liste im Reiter '
+            . 'Einstellungen berichtigt ist.');
+    } elseif ($w['wache_sperren_ein'] === 1 && is_file(ev_tmpdir() . '/letzte_wache_liste.txt')) {
+        ev_log_wenn_neu('wache_liste', 'Die Liste der erlaubten Schreiber ist brauchbar, die Sperre wirkt.');
+    }
+    $abweisen = $aktiv && !$erlaubt && !ev_wache_ruecknahme($aktion, $klar);
+    $zusatz = '';
+    if (!$probe && $w['wache_ein'] === 1) {
+        $m = ev_wache_merken($von, $ip, $aktion, $abweisen, $w);
+        if ($m['anzahl'] > 1) {
+            $zusatz .= ';SCHREIBER=' . (int) $m['anzahl'];
+        }
+        if (!$m['merker']) {
+            $zusatz .= ';WACHE=MERKER';
+        }
+    }
+    if ($abweisen) {
+        ev_ende(409, 'EVCC;OK=0;AKTION=' . $aktion . ';GRUND=FREMDSCHREIBER');
+    }
+    return $zusatz;
 }
 
 /* VOR der Tokenpruefung wird nichts angelegt.
@@ -376,6 +430,18 @@ if (empty($cfg['steuerung_ein'])) {
 
 $b = $befehle[$aktion];
 
+/* Schreiber-Wache (Energie-1 C1): &von= lesen. Fehlt es: '' (ohne Kennung). Eine
+ * Kennung, die nicht ins Muster passt (1..32 aus A-Z a-z 0-9 _ -), wird abgewiesen
+ * wie ein falscher Wert - abweisen statt zurechtbiegen (Nr. 19); ein Tippfehler
+ * faellt beim Einrichten auf. Eine Adresse OHNE von geht immer. */
+$ev_von = '';
+if (isset($_GET['von'])) {
+    $ev_von = is_string($_GET['von']) ? (string) $_GET['von'] : '';
+    if (!ev_wache_kennung_gueltig($ev_von)) {
+        ev_ende(400, 'EVCC;OK=0;AKTION=' . $aktion . ';GRUND=VON;ERLAUBT=A-Z,a-z,0-9,_,-;LAENGE=1..32');
+    }
+}
+
 /* Ladepunkt pruefen - aber nur, wo einer gebraucht wird.
  *
  * Streng seit 0.9.34 (C9): lp=1abc wurde bis 0.9.33 per (int) zu Ladepunkt 1
@@ -422,6 +488,12 @@ if ($b['pruef'] === 'plan') {
     }
     $zeit = gmdate('Y-m-d\TH:i:s\Z', time() + (int) round($std * 3600));
 }
+
+/* ---------------- Schreiber-Wache (Energie-1 C1) ----------------
+ *
+ * VOR der Bremse: auch ein Befehl, den die Bremse als unveraendert beantwortet,
+ * kommt von einem Schreiber. Die Bremse selbst bleibt, wie sie war. */
+$ev_wz = ev_wache_anwenden($aktion, $klar, $ev_von, $ev_probe);
 
 /* ---------------- Befehlsbremse (C3, seit 0.9.34) ----------------
  *
@@ -561,6 +633,9 @@ if ($b['pruef'] === 'planziel' || $b['pruef'] === 'planstunden') {
     $ev_antwort = sprintf("EVCC;OK=1;%sAKTION=%s;WERT=%s%s%s\n", $ev_pz, $aktion, $klar,
                           $gerundet, $zeit !== '' ? ';ZEIT=' . $zeit : '');
 }
+
+// Schreiber-Wache (Energie-1 C1): ;SCHREIBER=n / ;WACHE=MERKER hinten an.
+$ev_antwort = rtrim($ev_antwort, "\n") . $ev_wz . "\n";
 
 /* Der Trockenlauf endet hier (EVCC-b1): nichts an EVCC, der Bremsmerker
  * bleibt, wie er war, der Zwischenspeicher auch. */

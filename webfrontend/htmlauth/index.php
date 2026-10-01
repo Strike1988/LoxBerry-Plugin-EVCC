@@ -210,6 +210,39 @@ if ($ev_post && isset($_POST['speichern'])) {
     $ev_cfg['steuerung_ein'] = isset($_POST['steuerung_ein']) ? 1 : 0;
     $ev_cfg['update_ein'] = isset($_POST['update_ein']) ? 1 : 0;
 
+    /* Schreiber-Wache (Energie-1 C1, Entscheidung Nr. 25). Abgewiesen statt
+     * zurechtgebogen (Nr. 16/19): nichts wird gespeichert, das Feld ist markiert,
+     * die Eingabe kommt zurueck (X-2). Still bleibt nur Leerraum am Rand.
+     * Dieselbe Regel wie beim Zurueckspielen (ev_wert_pruefen, ev_wache_kreuz). */
+    $ev_cfg['wache_ein'] = isset($_POST['wache_ein']) ? 1 : 0;
+    $ev_cfg['wache_lb_melden'] = isset($_POST['wache_lb_melden']) ? 1 : 0;
+    $ev_cfg['wache_sperren_ein'] = isset($_POST['wache_sperren_ein']) ? 1 : 0;
+    $ev_wfr = (isset($_POST['wache_fenster_min']) && is_string($_POST['wache_fenster_min']))
+        ? trim((string) $_POST['wache_fenster_min']) : '';
+    if (!ev_wert_pruefen('wache_fenster_min', $ev_wfr)) {
+        $ev_fehler[] = sprintf(ev_t('EINST.FEHLER_GANZZAHL'), ev_t('EINST.L_WACHE_FENSTER'), 1, 120);
+        $ev_bean[] = 'wache_fenster_min';
+    } else {
+        $ev_cfg['wache_fenster_min'] = (int) $ev_wfr;
+    }
+    $ev_wer = (isset($_POST['wache_erlaubt']) && is_string($_POST['wache_erlaubt']))
+        ? trim((string) $_POST['wache_erlaubt']) : '';
+    list(, $ev_wef) = ev_wache_liste($ev_wer);
+    if (strlen($ev_wer) > 512) {
+        $ev_fehler[] = ev_t('EINST.FEHLER_WACHE_LANG');
+        $ev_bean[] = 'wache_erlaubt';
+    } elseif ($ev_wef || !ev_wert_pruefen('wache_erlaubt', $ev_wer)) {
+        $ev_fehler[] = sprintf(ev_t('EINST.FEHLER_WACHE_LISTE'),
+            ev_e(implode(', ', array_slice($ev_wef ? $ev_wef : array('?'), 0, 4))));
+        $ev_bean[] = 'wache_erlaubt';
+    } elseif (ev_wache_kreuz(array('wache_sperren_ein' => $ev_cfg['wache_sperren_ein'], 'wache_erlaubt' => $ev_wer))) {
+        $ev_fehler[] = ev_t('EINST.FEHLER_WACHE_LEER');
+        $ev_bean[] = 'wache_sperren_ein';
+        $ev_bean[] = 'wache_erlaubt';
+    } else {
+        $ev_cfg['wache_erlaubt'] = $ev_wer;
+    }
+
     /* Abgewiesen: die Eingaben reisen zurueck ins Formular (X-2). */
     if ($ev_fehler) {
         $ev_eingaben = ev_eingaben_sammeln('speichern', $ev_bean);
@@ -661,6 +694,41 @@ if ($ev_link !== $ev_cfg['url']) { ?>
   </label>
 </div>
 
+<?php /* Schreiber-Wache (Energie-1 C1, Entscheidung Nr. 25): melden ab Werk an,
+         sperren ab Werk aus. Steht immer da - gemerkt wird nur, was der Endpunkt
+         annimmt, und das setzt "Steuerung aus Loxone zulassen" voraus. */ ?>
+<h3><?= ev_e(ev_t('EINST.H_WACHE')) ?></h3>
+<div class="sm-hilfe"><?= ev_t('EINST.H_WACHE_TEXT') ?></div>
+<div class="sm-feld">
+  <label style="display:inline-flex;align-items:center;gap:8px;font-weight:400;">
+    <input data-role="none" type="checkbox" name="wache_ein" value="1"<?= ev_markierung('speichern', 'wache_ein') ?> <?= !empty(ev_eingabe('speichern', 'wache_ein', $ev_cfg['wache_ein'])) ? 'checked' : '' ?>>
+    <?= ev_e(ev_t('EINST.L_WACHE_EIN')) ?>
+  </label>
+</div>
+<div class="sm-feld">
+  <label for="wache_fenster_min"><?= ev_e(ev_t('EINST.L_WACHE_FENSTER')) ?></label>
+  <input data-role="none" type="number" id="wache_fenster_min" name="wache_fenster_min" value="<?= ev_e(ev_eingabe('speichern', 'wache_fenster_min', (string) $ev_cfg['wache_fenster_min'])) ?>"<?= ev_markierung('speichern', 'wache_fenster_min') ?> min="1" max="120">
+  <div class="sm-hilfe"><?= ev_t('EINST.H_WACHE_FENSTER') ?></div>
+</div>
+<div class="sm-feld">
+  <label style="display:inline-flex;align-items:center;gap:8px;font-weight:400;">
+    <input data-role="none" type="checkbox" name="wache_lb_melden" value="1"<?= ev_markierung('speichern', 'wache_lb_melden') ?> <?= !empty(ev_eingabe('speichern', 'wache_lb_melden', $ev_cfg['wache_lb_melden'])) ? 'checked' : '' ?>>
+    <?= ev_e(ev_t('EINST.L_WACHE_LB')) ?>
+  </label>
+</div>
+<div class="sm-feld">
+  <label style="display:inline-flex;align-items:center;gap:8px;font-weight:400;">
+    <input data-role="none" type="checkbox" name="wache_sperren_ein" value="1"<?= ev_markierung('speichern', 'wache_sperren_ein') ?> <?= !empty(ev_eingabe('speichern', 'wache_sperren_ein', $ev_cfg['wache_sperren_ein'])) ? 'checked' : '' ?>>
+    <?= ev_e(ev_t('EINST.L_WACHE_SPERREN')) ?>
+  </label>
+  <div class="sm-hilfe"><?= ev_t('EINST.H_WACHE_SPERREN') ?></div>
+</div>
+<div class="sm-feld">
+  <label for="wache_erlaubt"><?= ev_e(ev_t('EINST.L_WACHE_ERLAUBT')) ?></label>
+  <input data-role="none" type="text" id="wache_erlaubt" name="wache_erlaubt" value="<?= ev_e(ev_eingabe('speichern', 'wache_erlaubt', (string) $ev_cfg['wache_erlaubt'])) ?>"<?= ev_markierung('speichern', 'wache_erlaubt') ?> placeholder="loxone">
+  <div class="sm-hilfe"><?= ev_t('EINST.H_WACHE_ERLAUBT') ?></div>
+</div>
+
 <h2><?= ev_e(ev_t('EINST.H_UPDATE')) ?></h2>
 <div class="sm-warnung"><?= ev_t('EINST.H_UPDATE_TEXT') ?></div>
 <div class="sm-feld">
@@ -876,7 +944,8 @@ if ($ev_altwerte) { ?>
    Pruefung und die Vorlage ihre Ausgaenge nimmt. Bis 0.9.10 stand die Liste
    hier ein drittes Mal von Hand. */
 foreach (ev_befehle() as $ev_a => $ev_b) {
-    $ev_adr = '&amp;aktion=' . $ev_a . ($ev_b['ebene'] === 'lp' ? '&amp;lp=1' : '');
+    // Energie-1 C1: wie die Vorlage mit von=loxone (Schreiber-Wache).
+    $ev_adr = '&amp;aktion=' . $ev_a . ($ev_b['ebene'] === 'lp' ? '&amp;lp=1' : '') . '&amp;von=loxone';
     if ($ev_b['pruef'] === 'ohne')          { $ev_adr .= ''; }
     elseif ($ev_b['pruef'] === 'schalter')  { $ev_adr .= '&amp;wert=1|0'; }
     elseif ($ev_b['pruef'] === 'plan')      { $ev_adr .= '&amp;wert=&lt;ziel&gt;&amp;stunden=&lt;vorlauf&gt;'; }
@@ -904,6 +973,7 @@ foreach (ev_befehle() as $ev_a => $ev_b) {
 <?php } ?>
 </table>
 <div class="sm-warnung"><?= ev_t('LOX.BEFEHLE_DOKU_WARNUNG') ?></div>
+<div class="sm-hilfe"><?= ev_t('LOX.VON_HINWEIS') ?></div>
 </div>
 <?php } ?>
 
@@ -934,7 +1004,7 @@ foreach (ev_befehle() as $ev_a => $ev_b) {
 <div class="sm-step"><b><?= ev_e(ev_t('SPOT.H_GRENZE')) ?></b><br>
 <?= ev_t('SPOT.GRENZE_TEXT') ?>
 <?php if (!empty($ev_cfg['steuerung_ein'])) { ?>
-<div class="sm-pre"><?= ev_e(ev_endpunkt('smartcostlimit')) ?>&amp;lp=1&amp;wert=&lt;v.3&gt;</div>
+<div class="sm-pre"><?= ev_e(ev_endpunkt('smartcostlimit')) ?>&amp;lp=1&amp;von=loxone&amp;wert=&lt;v.3&gt;</div>
 <?= ev_t('SPOT.GRENZE_EINHEIT') ?>
 <?php } else { ?>
 <div class="sm-hilfe"><?= ev_t('SPOT.GRENZE_GESPERRT') ?></div>
@@ -1074,6 +1144,31 @@ foreach ($ev_pr as $ev_z) {
     <td><?= $ev_z[1] ?></td><td><?= $ev_z[2] ?></td></tr>
 <?php } ?>
 </table>
+<?php
+/* Schreiber der letzten 24 Stunden (Energie-1 C1). Frisch aus dem Merker gelesen
+   (LOCK_SH), die Einstellungen aus der Datei - nicht aus der X-2-Rueckfuellung. */
+$ev_wtw = ev_wache_einstellungen(ev_config());
+list($ev_wtz, $ev_wtl) = ev_wache_lesen(); ?>
+<h3><?= ev_e(ev_t('TEST.H_WACHE_TABELLE')) ?></h3>
+<?php if ($ev_wtz === 'merker') { ?>
+<div class="sm-fehler"><?= sprintf(ev_t('TEST.A_WACHE_MERKER'), ev_e(ev_wache_datei())) ?></div>
+<?php } elseif (!$ev_wtl) { ?>
+<div class="sm-hilfe"><?= ev_t('TEST.A_WACHE_TABELLE_LEER') ?></div>
+<?php } else { ?>
+<table class="sm-tbl">
+<tr><th><?= ev_e(ev_t('TEST.T_W_KENNUNG')) ?></th><th><?= ev_e(ev_t('TEST.T_W_ABSENDER')) ?></th><th><?= ev_e(ev_t('TEST.T_W_BEFEHL')) ?></th><th><?= ev_e(ev_t('TEST.T_W_ZUERST')) ?></th><th><?= ev_e(ev_t('TEST.T_W_ZULETZT')) ?></th><th><?= ev_e(ev_t('TEST.T_W_ANZAHL')) ?></th><th><?= ev_e(ev_t('TEST.T_W_ABGEWIESEN')) ?></th><th><?= ev_e(ev_t('TEST.T_W_FENSTER')) ?></th></tr>
+<?php foreach ($ev_wtl as $ev_wx) { ?>
+<tr><td><?= $ev_wx['von'] !== '' ? '<span class="sm-mono">' . ev_e($ev_wx['von']) . '</span>' : ev_e(ev_t('TEST.W_OHNE_KENNUNG')) ?></td>
+    <td><span class="sm-mono"><?= ev_e($ev_wx['ip'] !== '' ? $ev_wx['ip'] : '?') ?></span></td>
+    <td><span class="sm-mono"><?= ev_e($ev_wx['art']) ?></span></td>
+    <td><?= ev_e(date('d.m. H:i:s', $ev_wx['erst'])) ?></td>
+    <td><?= ev_e(date('d.m. H:i:s', $ev_wx['zuletzt'])) ?></td>
+    <td><?= (int) $ev_wx['n'] ?></td>
+    <td><?= (int) $ev_wx['abgewiesen'] ?></td>
+    <td><?= ev_e(ev_t(abs(time() - $ev_wx['zuletzt']) < 60 * $ev_wtw['wache_fenster_min'] ? 'TEST.W_JA' : 'TEST.W_NEIN')) ?></td></tr>
+<?php } ?>
+</table>
+<?php } ?>
 <?php } ?>
 
 <h3><?= ev_e(ev_t('TEST.H_KNOEPFE')) ?></h3>
