@@ -9,6 +9,14 @@ Weg nach Loxone: EVCC rechnet in Watt und veröffentlicht unter eigenen Namen,
 der Energiemanager will Kilowatt an vier bestimmten Anschlüssen. Dieses Plugin
 ist der Übersetzer dazwischen.
 
+## Neu in 0.9.38
+
+Hinweise zur Schreiber-Kennung (Energie-1, Entscheidung 25).
+Nur Text in Hilfe, README und Einstellungen; das Verhalten des Plugins ist unverändert.
+
+* **Kennung für EVCC selbst:** Steuert EVCC einen Hausspeicher über ein LoxBerry-Plugin (Eintrag in `/etc/evcc.yaml`), gehört `&von=evcc` an diese Adresse. Das Plugin ändert `evcc.yaml` nie.
+* **Erlaubte Schreiber:** Die Hilfe nennt die Kennungen der Hausplugins für die Liste der erlaubten Schreiber: `loxone`, `einspeisebremse`, `awattar`.
+
 ## Neu in 0.9.37
 
 Energie-1 Teile C1 und C6 (Verbesserungsliste `Pruefung-Durchgang-2026-09-29/VERBESSERUNGEN_OFFEN.md`, Entscheidung 25).
@@ -925,6 +933,11 @@ ohne `von` geht immer und erscheint als „ohne Kennung“.
 * Eine ältere Vorlage ohne `von=loxone` arbeitet weiter. Es genügt, an die
   bestehenden Befehle `&von=loxone` anzuhängen; ein zweiter Import legte die
   Bausteine doppelt an.
+* Kennungen der Plugins in diesem Haus, die am Endpunkt auftreten können:
+  `loxone` (Loxone-Vorlagen), `einspeisebremse` (Einspeisebremse an Stellgliedern
+  mit Plugin-Adresse, dort ab Werk aus) und `awattar` (Spotpreis-Kopplung). Ein
+  eigener Weg (Skript, zweiter Miniserver) bekommt am besten eine eigene Kennung;
+  dann kann die Liste der erlaubten Schreiber Kennungen statt Adressen nennen.
 
 ## EVCC neben Hausspeichern
 
@@ -952,6 +965,13 @@ nötig.
   100 W gerundet) und nur bei Änderung.
 * Ob EVCC so regelt, wie es soll, zeigt die EVCC-Oberfläche (Reserve und
   Ladeleistung am Ladepunkt).
+* **EVCC an einem Speicher-Plugin:** Steuert EVCC selbst einen Hausspeicher über
+  den Endpunkt eines LoxBerry-Plugins (in `/etc/evcc.yaml`, etwa BatterieBMS mit
+  `aktion=batteriemodus`), gehört `&von=evcc` an diese Adresse. Die
+  Schreiber-Wache des Speicher-Plugins zeigt EVCC dann mit Namen statt als „ohne
+  Kennung“, und BatterieBMS erkennt EVCC daran für die Einstellung „Führung“.
+  Dieses Plugin ändert `/etc/evcc.yaml` nie; die Adresse trägt man in EVCC selbst
+  ein.
 
 ## Laden nach Strompreis
 
