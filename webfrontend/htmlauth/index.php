@@ -891,6 +891,59 @@ if ($ev_altwerte) { ?>
 <div class="sm-warnung"><?= ev_t('LOX.EM_WARNUNG') ?></div>
 </div>
 
+<?php
+/* Energieflussmonitor: welcher Wert an welchen Zaehler-Baustein.
+ *
+ * Der Energieflussmonitor nimmt keine Werte direkt, sondern Zaehler-Bausteine
+ * (Netz bidirektional, Erzeuger, Speicher, Verbraucher). Die Vorlage kann sie
+ * nicht anlegen - Loxone Config importiert ueber XML nur virtuelle Ein- und
+ * Ausgaenge. Deshalb steht hier die Zuordnung, dazu je Zeile, ob der letzte
+ * Abruf den Wert ueberhaupt geliefert hat: Ein fehlender Zaehlerstand geht in
+ * der Statuszeile als 0 hinaus, und an Mr/Mrc stuende der Zaehler dann still.
+ * Gelesen wird nur der Zwischenspeicher ($ev_stand), keine eigene Anfrage. */
+$ev_efm_werte = !empty($ev_stand['stand']) ? ev_werte($ev_stand) : array();
+$ev_efm_felder = ev_felder();
+$ev_efm = array(
+    array('LOX.EFM_NETZ', 'LOX.EFM_TYP_BIDIREKTIONAL', 'Pf', 'netz_kw'),
+    array('', '', 'Mrc', 'netz_bezug_kwh'),
+    array('LOX.EFM_PV', 'LOX.EFM_TYP_ZAEHLER', 'Pf', 'pv_kw'),
+    array('', '', 'Mr', 'pv_ertrag_kwh'),
+    array('LOX.EFM_SPEICHER', 'LOX.EFM_TYP_SPEICHER', 'Pf', 'speicher_kw'),
+    array('', '', 'Slvl', 'speicher_soc'),
+);
+for ($ev_i = 1; $ev_i <= (int) $ev_cfg['ladepunkte']; $ev_i++) {
+    $ev_efm[] = array(array('LOX.EFM_WALLBOX', $ev_i), 'LOX.EFM_TYP_ZAEHLER', 'Pf', 'lp' . $ev_i . '_leistung_kw');
+    $ev_efm[] = array('', '', 'Mr', 'lp' . $ev_i . '_gesamt_kwh');
+}
+?>
+<h2><?= ev_e(ev_t('LOX.H_EFM')) ?></h2>
+<div class="sm-hinweis"><?= ev_t('LOX.EFM_EINLEITUNG') ?></div>
+
+<div class="sm-step"><b><?= ev_e(ev_t('LOX.H_EFM_TABELLE')) ?></b><br>
+<?= ev_t('LOX.EFM_TEXT') ?>
+<table class="sm-tbl">
+<tr><th><?= ev_e(ev_t('LOX.T_ZAEHLER')) ?></th><th><?= ev_e(ev_t('LOX.T_ANSCHLUSS')) ?></th><th><?= ev_e(ev_t('LOX.T_VONHIER')) ?></th><th><?= ev_e(ev_t('LOX.T_LETZTER_ABRUF')) ?></th></tr>
+<?php foreach ($ev_efm as $ev_z) {
+    list($ev_knoten, $ev_typ, $ev_eingang, $ev_feld) = $ev_z;
+    if (is_array($ev_knoten)) { $ev_knoten = sprintf(ev_t($ev_knoten[0]), $ev_knoten[1]); }
+    elseif ($ev_knoten !== '') { $ev_knoten = ev_t($ev_knoten); }
+    if (!$ev_efm_werte || !isset($ev_efm_werte[$ev_feld])) {
+        $ev_abruf = '<span style="color:#888;">&ndash;</span>';
+    } elseif (!empty($ev_efm_werte[$ev_feld]['ohne'])) {
+        $ev_abruf = '<span class="sm-aus">' . ev_e(ev_t('LOX.EFM_NICHT_GELIEFERT')) . '</span>';
+    } else {
+        $ev_abruf = '<span class="sm-an">' . ev_e($ev_efm_werte[$ev_feld]['wert']
+            . (isset($ev_efm_felder[$ev_feld]['einheit']) && $ev_efm_felder[$ev_feld]['einheit'] !== ''
+               ? ' ' . $ev_efm_felder[$ev_feld]['einheit'] : '')) . '</span>';
+    } ?>
+<tr><td><?php if ($ev_knoten !== '') { ?><b><?= ev_e($ev_knoten) ?></b><br><?= ev_e(ev_t($ev_typ)) ?><?php } ?></td><td><span class="sm-mono"><?= ev_e($ev_eingang) ?></span></td><td><span class="sm-mono"><?= ev_e('EVCC_' . strtoupper($ev_feld)) ?></span></td><td><?= $ev_abruf ?></td></tr>
+<?php } ?>
+</table>
+<div class="sm-hilfe"><?= ev_t('LOX.EFM_ZAEHLERSTAND') ?></div>
+<div class="sm-hilfe"><?= ev_t('LOX.EFM_VORZEICHEN') ?></div>
+<div class="sm-warnung"><?= ev_t('LOX.EFM_WARNUNG') ?></div>
+</div>
+
 <h2><?= ev_e(ev_t('LOX.H_VORLAGE')) ?></h2>
 <div class="sm-hinweis"><?= ev_t('LOX.VORLAGE_TEXT') ?></div>
 <div class="sm-legende">

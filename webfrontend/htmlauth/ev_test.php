@@ -298,6 +298,28 @@ function ev_pruefungen()
     } else {
         $z[] = ev_pruefzeile(-1, ev_t('TEST.F_BETRIEB'), ev_t('TEST.A_BETRIEB_UNKLAR'));
     }
+
+    /* ---- Passt die eingestellte Zahl der Ladepunkte zu EVCC? ----
+     *
+     * Sind mehr eingestellt, als EVCC fuehrt, legt die Vorlage Eingaenge fuer
+     * Ladepunkte an, die es nicht gibt: Zustaende stehen auf -1, Leistungen
+     * und Zaehlerstaende auf 0 - in Loxone sieht das aus wie eine Wallbox,
+     * die gerade nicht laedt. Weniger einzustellen ist erlaubt (grau). Nur
+     * pruefen, wenn EVCC eingerichtet ist und Ladepunkte meldet. */
+    if ($st['ok'] && $ein['einrichtung'] === 1 && $ein['ladepunkte'] > 0) {
+        $ev_lp_soll = (int) $cfg['ladepunkte'];
+        $ev_lp_ist = (int) $ein['ladepunkte'];
+        if ($ev_lp_soll > $ev_lp_ist) {
+            $z[] = ev_pruefzeile(0, ev_t('TEST.F_LP_ANZAHL'),
+                sprintf(ev_t('TEST.A_LP_ZUVIEL'), $ev_lp_soll, $ev_lp_ist));
+        } elseif ($ev_lp_soll < $ev_lp_ist) {
+            $z[] = ev_pruefzeile(-1, ev_t('TEST.F_LP_ANZAHL'),
+                sprintf(ev_t('TEST.A_LP_WENIGER'), $ev_lp_soll, $ev_lp_ist));
+        } else {
+            $z[] = ev_pruefzeile(1, ev_t('TEST.F_LP_ANZAHL'),
+                sprintf(ev_t('TEST.A_LP_OK'), $ev_lp_ist));
+        }
+    }
     if ($ein['neuer'] !== '') {
         $z[] = ev_pruefzeile(-1, ev_t('TEST.F_EVCC_NEU'),
             sprintf(ev_t('TEST.A_EVCC_NEU' . ev_update_weg()),
