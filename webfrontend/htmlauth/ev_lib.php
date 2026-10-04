@@ -1552,6 +1552,19 @@ function ev_felder($ev_namen_vorgabe = null)
             'quelle' => 'bestand', 'seit' => '0.9.34');
     }
 
+    /* ---- Zaehlerstand Netzeinspeisung ----
+     * Gegenstueck zu netz_bezug_kwh, fuer den Eingang Mrd am Zaehler
+     * Bidirektional (Energieflussmonitor). EVCC liefert grid.returnEnergy,
+     * sobald der Netzzaehler MeterReturnEnergy kann (seit EVCC 0.316,
+     * etwa Sungrow-Hybrid oder Victron Energy mit gesetzter VRM-Instanz).
+     * Angehaengt, damit sich die Reihenfolge der Statuszeile nicht
+     * verschiebt. */
+    $f['netz_einspeisung_kwh'] = array(
+        'pfade' => array('grid.returnEnergy'),
+        'typ' => 'komma3', 'analog' => 1, 'min' => 0, 'max' => 1000000, 'einheit' => 'kWh',
+        'text' => 'FELD.NETZ_EINSPEISUNG', 'mqtt' => 'evcc/site/grid/returnEnergy',
+        'quelle' => 'doku', 'seit' => '0.9.39');
+
     /* ---- Seit wann gibt es das Feld? ----
      *
      * Das ist eine ANDERE Frage als 'quelle'. 'quelle' sagt, ob ein Feld an

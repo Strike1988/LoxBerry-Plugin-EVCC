@@ -906,6 +906,7 @@ $ev_efm_felder = ev_felder();
 $ev_efm = array(
     array('LOX.EFM_NETZ', 'LOX.EFM_TYP_BIDIREKTIONAL', 'Pf', 'netz_kw'),
     array('', '', 'Mrc', 'netz_bezug_kwh'),
+    array('', '', 'Mrd', 'netz_einspeisung_kwh'),
     array('LOX.EFM_PV', 'LOX.EFM_TYP_ZAEHLER', 'Pf', 'pv_kw'),
     array('', '', 'Mr', 'pv_ertrag_kwh'),
     array('LOX.EFM_SPEICHER', 'LOX.EFM_TYP_SPEICHER', 'Pf', 'speicher_kw'),
